@@ -26,6 +26,13 @@ export interface MatchScore {
   participant2Score: number;
 }
 
+// Historique de modification de score
+export interface ScoreHistory {
+  previousScore: MatchScore;
+  modifiedAt: Date;
+  reason?: string;
+}
+
 // Match
 export interface Match {
   id: string;
@@ -37,6 +44,7 @@ export interface Match {
   winnerId?: string;
   loserId?: string;
   score?: MatchScore;
+  scoreHistory?: ScoreHistory[];
   status: MatchStatus;
   scheduledAt?: Date;
   startedAt?: Date;
@@ -92,10 +100,61 @@ export interface TournamentConfig {
   // Général
   bestOf?: number;
   
+  // Affichage des scores détaillés (BP/BC) - utile pour le sport
+  showScoreDetails?: boolean;
+  
+  // Le score le plus haut gagne (true par défaut, false = score le plus bas gagne)
+  highScoreWins?: boolean;
+  
+  // Confrontation directe en cas d'égalité
+  useHeadToHead?: boolean;
+  
+  // Cashprize
+  cashprize?: {
+    total: number;
+    currency: '€' | '£' | '$' | 'points';
+    // Répartition individuelle par place
+    distribution: { place: number; percent: number }[];
+    // Répartition par plage (ex: 10% à répartir entre places 6-30)
+    ranges: { startPlace: number; endPlace: number; percent: number }[];
+    // Lots matériels individuels
+    materialPrizes: { place: number; description: string }[];
+    // Lots matériels par plage
+    materialPrizeRanges: { startPlace: number; endPlace: number; description: string }[];
+  };
+  
   // Intégration timer
   useTimer?: boolean;
   timerDuration?: number; // en secondes
   timerMode?: 'simultaneous' | 'cumulative';
+}
+
+// Pénalité pour un participant
+export interface Penalty {
+  id: string;
+  participantId: string;
+  points: number;
+  reason: string;
+  createdAt: Date;
+}
+
+// Statut d'élimination d'un participant
+export interface ParticipantStatus {
+  participantId: string;
+  isEliminated: boolean;
+  eliminatedAt?: Date;
+  eliminationReason?: string;
+  // Informations pour la réintégration (tournois à élimination)
+  forfeitMatchId?: string; // Match où l'élimination a eu lieu
+  originalMatchState?: {   // État original du match avant modification
+    status: MatchStatus;
+    score?: {
+      participant1Score: number;
+      participant2Score: number;
+    };
+    winnerId?: string;
+  };
+  promotedOpponentId?: string; // Joueur repêché qui a remplacé l'éliminé
 }
 
 // Tournoi principal
@@ -109,6 +168,8 @@ export interface Tournament {
   participants: Participant[];
   matches: Match[];
   groups?: Group[];
+  penalties?: Penalty[];
+  participantStatuses?: ParticipantStatus[];
   createdAt: Date;
   updatedAt: Date;
   startedAt?: Date;
@@ -142,5 +203,6 @@ export interface MatchResultInput {
   matchId: string;
   participant1Score: number;
   participant2Score: number;
-  winnerId: string;
+  // Optionnel - calculé automatiquement sauf en cas d'égalité
+  winnerId?: string;
 }

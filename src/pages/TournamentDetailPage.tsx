@@ -3,13 +3,13 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { 
   ArrowLeft, 
   Play, 
-  Settings, 
   Trash2, 
   Users,
   Trophy,
   LayoutGrid,
   List,
-  Timer
+  Timer,
+  Crown
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -19,11 +19,12 @@ import {
   ParticipantsList, 
   MatchList, 
   GroupStandingsTable,
-  MatchResultModal 
+  MatchResultModal,
+  WinnerSelectionModal,
+  ParticipantManagementModal
 } from '@/components/tournament';
 import { useTournament } from '@/context/TournamentContext';
-import { cn } from '@/lib/utils';
-import type { Match, TournamentStatus } from '@/types';
+import type { Match, TournamentStatus, Participant } from '@/types';
 
 type ViewMode = 'bracket' | 'list' | 'groups';
 
@@ -45,19 +46,24 @@ export function TournamentDetailPage() {
     generateBracket,
     startTournament,
     submitMatchResult,
-    deleteTournament
+    deleteTournament,
+    setTournamentWinner,
+    addPenalty,
+    removePenalty,
+    eliminateParticipant,
+    reinstateParticipant
   } = useTournament();
 
   const [viewMode, setViewMode] = useState<ViewMode>('bracket');
   const [selectedMatch, setSelectedMatch] = useState<Match | null>(null);
+  const [showWinnerSelection, setShowWinnerSelection] = useState(false);
+  const [selectedParticipant, setSelectedParticipant] = useState<Participant | null>(null);
 
   const tournament = tournaments.find(t => t.id === id);
 
   useEffect(() => {
-    if (tournament?.format === 'groups') {
+    if (tournament?.format === 'groups' || tournament?.format === 'championship') {
       setViewMode('groups');
-    } else if (tournament?.format === 'championship') {
-      setViewMode('list');
     }
   }, [tournament?.format]);
 
@@ -92,7 +98,7 @@ export function TournamentDetailPage() {
     setSelectedMatch(match);
   };
 
-  const handleSubmitResult = (winnerId: string, score1: number, score2: number) => {
+  const handleSubmitResult = (winnerId: string | undefined, score1: number, score2: number) => {
     if (selectedMatch) {
       submitMatchResult({
         matchId: selectedMatch.id,
@@ -113,11 +119,18 @@ export function TournamentDetailPage() {
 
   const canGenerateBracket = tournament.status === 'draft' && tournament.participants.length >= 2;
   const canStart = tournament.status === 'registration' && tournament.matches.length > 0;
-  const isEditable = tournament.status === 'draft';
+  // Ajout de joueurs uniquement en mode brouillon (avant génération du bracket)
+  const canAddParticipants = tournament.status === 'draft';
+  const canRemoveParticipants = tournament.status === 'draft';
 
   const winner = tournament.winnerId 
     ? tournament.participants.find(p => p.id === tournament.winnerId)
     : null;
+
+  // Vérifier si le tournoi est terminé mais sans vainqueur (égalité)
+  const allMatchesCompleted = tournament.matches.length > 0 && 
+    tournament.matches.every(m => m.status === 'completed');
+  const needsWinnerSelection = allMatchesCompleted && !tournament.winnerId;
 
   return (
     <div className="space-y-8 animate-fade-in">
@@ -158,9 +171,6 @@ export function TournamentDetailPage() {
               Démarrer
             </Button>
           )}
-          <Button variant="ghost" size="icon">
-            <Settings className="h-4 w-4" />
-          </Button>
           <Button variant="ghost" size="icon" onClick={handleDelete} className="text-destructive hover:text-destructive">
             <Trash2 className="h-4 w-4" />
           </Button>
@@ -182,13 +192,34 @@ export function TournamentDetailPage() {
         </Card>
       )}
 
+      {/* Needs winner selection banner */}
+      {needsWinnerSelection && (
+        <Card className="border-warning bg-gradient-to-r from-warning/10 to-warning/5">
+          <CardContent className="flex items-center justify-between gap-4 py-6">
+            <div className="flex items-center gap-4">
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-warning/20 text-warning">
+                <Crown className="h-8 w-8" />
+              </div>
+              <div>
+                <p className="text-sm text-warning font-medium">Égalité détectée</p>
+                <h2 className="font-display text-lg font-semibold">Désignez le vainqueur du tournoi</h2>
+              </div>
+            </div>
+            <Button onClick={() => setShowWinnerSelection(true)} variant="warning">
+              <Trophy className="h-4 w-4 mr-2" />
+              Choisir le vainqueur
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Main content */}
         <div className="lg:col-span-2 space-y-6">
           {/* View mode selector */}
           {tournament.matches.length > 0 && (
             <div className="flex items-center gap-2 p-1 bg-muted rounded-lg w-fit">
-              {tournament.format !== 'championship' && (
+              {tournament.format !== 'championship' && tournament.format !== 'groups' && (
                 <Button
                   variant={viewMode === 'bracket' ? 'default' : 'ghost'}
                   size="sm"
@@ -199,7 +230,7 @@ export function TournamentDetailPage() {
                   Bracket
                 </Button>
               )}
-              {tournament.format === 'groups' && (
+              {(tournament.format === 'groups' || tournament.format === 'championship') && (
                 <Button
                   variant={viewMode === 'groups' ? 'default' : 'ghost'}
                   size="sm"
@@ -207,7 +238,7 @@ export function TournamentDetailPage() {
                   className="gap-2"
                 >
                   <Users className="h-4 w-4" />
-                  Groupes
+                  Classement
                 </Button>
               )}
               <Button
@@ -217,7 +248,7 @@ export function TournamentDetailPage() {
                 className="gap-2"
               >
                 <List className="h-4 w-4" />
-                Liste
+                Matchs
               </Button>
             </div>
           )}
@@ -232,21 +263,27 @@ export function TournamentDetailPage() {
                 <BracketView
                   matches={tournament.matches}
                   participants={tournament.participants}
+                  participantStatuses={tournament.participantStatuses}
                   onMatchClick={handleMatchClick}
                 />
               </CardContent>
             </Card>
           )}
 
-          {/* Groups view */}
-          {viewMode === 'groups' && tournament.format === 'groups' && (
+          {/* Groups/Standings view */}
+          {viewMode === 'groups' && (tournament.format === 'groups' || tournament.format === 'championship') && (
             <div className="space-y-6">
               {tournament.groups?.map(group => (
                 <GroupStandingsTable
                   key={group.id}
                   group={group}
                   participants={tournament.participants}
-                  qualifiersCount={tournament.config.qualifiersPerGroup}
+                  matches={tournament.matches.filter(m => m.groupId === group.id || tournament.format === 'championship')}
+                  penalties={tournament.penalties}
+                  participantStatuses={tournament.participantStatuses}
+                  qualifiersCount={tournament.format === 'groups' ? tournament.config.qualifiersPerGroup : undefined}
+                  showScoreDetails={tournament.config.showScoreDetails}
+                  useHeadToHead={tournament.config.useHeadToHead}
                 />
               ))}
             </div>
@@ -266,6 +303,7 @@ export function TournamentDetailPage() {
                         key={group.id}
                         matches={tournament.matches.filter(m => m.groupId === group.id)}
                         participants={tournament.participants}
+                        participantStatuses={tournament.participantStatuses}
                         onMatchClick={handleMatchClick}
                         groupName={group.name}
                       />
@@ -275,6 +313,7 @@ export function TournamentDetailPage() {
                   <MatchList
                     matches={tournament.matches}
                     participants={tournament.participants}
+                    participantStatuses={tournament.participantStatuses}
                     onMatchClick={handleMatchClick}
                   />
                 )}
@@ -316,8 +355,13 @@ export function TournamentDetailPage() {
                 participants={tournament.participants}
                 onAdd={handleAddParticipant}
                 onRemove={handleRemoveParticipant}
-                disabled={!isEditable}
+                canAdd={canAddParticipants}
+                canRemove={canRemoveParticipants}
                 winnerId={tournament.winnerId}
+                penalties={tournament.penalties}
+                participantStatuses={tournament.participantStatuses}
+                onManageParticipant={setSelectedParticipant}
+                showManagement={tournament.status !== 'draft'}
               />
             </CardContent>
           </Card>
@@ -363,6 +407,98 @@ export function TournamentDetailPage() {
               </div>
             </CardContent>
           </Card>
+
+          {/* Cashprize */}
+          {tournament.config.cashprize && (
+            <Card className="border-warning/30 bg-gradient-to-br from-warning/5 to-warning/10">
+              <CardHeader className="pb-3">
+                <CardTitle className="flex items-center gap-2 text-warning">
+                  <Trophy className="h-5 w-5" />
+                  Cashprize
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="text-2xl font-bold text-center">
+                  {tournament.config.cashprize.total} {tournament.config.cashprize.currency}
+                </div>
+                
+                {/* Distribution individuelle */}
+                {tournament.config.cashprize.distribution.length > 0 && (
+                  <div className="space-y-2">
+                    {tournament.config.cashprize.distribution.map((item) => {
+                      const amount = Math.round(tournament.config.cashprize!.total * item.percent / 100);
+                      return (
+                        <div key={item.place} className="flex justify-between items-center text-sm">
+                          <span className="text-muted-foreground">
+                            {item.place}{item.place === 1 ? 'er' : 'ème'}
+                          </span>
+                          <span className="font-semibold">
+                            {amount} {tournament.config.cashprize!.currency} ({item.percent}%)
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                
+                {/* Plages */}
+                {tournament.config.cashprize.ranges.length > 0 && (
+                  <div className="space-y-2 pt-2 border-t border-warning/20">
+                    {tournament.config.cashprize.ranges.map((range, index) => {
+                      const totalAmount = Math.round(tournament.config.cashprize!.total * range.percent / 100);
+                      const placesCount = range.endPlace - range.startPlace + 1;
+                      const perPlace = Math.round(totalAmount / placesCount);
+                      return (
+                        <div key={index} className="text-sm">
+                          <div className="flex justify-between items-center">
+                            <span className="text-muted-foreground">
+                              {range.startPlace}ème - {range.endPlace}ème
+                            </span>
+                            <span className="font-semibold">
+                              {totalAmount} {tournament.config.cashprize!.currency} ({range.percent}%)
+                            </span>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            soit {perPlace} {tournament.config.cashprize!.currency}/joueur
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                
+                {/* Lots matériels */}
+                {tournament.config.cashprize.materialPrizes && tournament.config.cashprize.materialPrizes.length > 0 && (
+                  <div className="space-y-2 pt-2 border-t border-warning/20">
+                    <p className="text-xs font-medium text-muted-foreground uppercase">Lots</p>
+                    {tournament.config.cashprize.materialPrizes.map((prize, index) => (
+                      <div key={index} className="flex justify-between items-center text-sm">
+                        <span className="text-muted-foreground">
+                          {prize.place}{prize.place === 1 ? 'er' : 'ème'}
+                        </span>
+                        <span className="font-medium">{prize.description}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                
+                {/* Plages de lots matériels */}
+                {tournament.config.cashprize.materialPrizeRanges && tournament.config.cashprize.materialPrizeRanges.length > 0 && (
+                  <div className="space-y-2 pt-2 border-t border-warning/20">
+                    <p className="text-xs font-medium text-muted-foreground uppercase">Lots par plage</p>
+                    {tournament.config.cashprize.materialPrizeRanges.map((range, index) => (
+                      <div key={index} className="flex justify-between items-center text-sm">
+                        <span className="text-muted-foreground">
+                          {range.startPlace}ème - {range.endPlace}ème
+                        </span>
+                        <span className="font-medium">{range.description}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
         </div>
       </div>
 
@@ -373,8 +509,76 @@ export function TournamentDetailPage() {
           participants={tournament.participants}
           onSubmit={handleSubmitResult}
           onClose={() => setSelectedMatch(null)}
+          highScoreWins={tournament.config.highScoreWins !== false}
         />
       )}
+
+      {/* Winner selection modal */}
+      {showWinnerSelection && (
+        <WinnerSelectionModal
+          participants={tournament.participants}
+          standings={tournament.groups?.[0]?.standings}
+          onSelect={(winnerId) => {
+            setTournamentWinner(tournament.id, winnerId);
+            setShowWinnerSelection(false);
+          }}
+          onClose={() => setShowWinnerSelection(false)}
+        />
+      )}
+
+      {/* Participant management modal */}
+      {selectedParticipant && (() => {
+        // Calculer si le joueur peut avoir un repêchage
+        const isEliminationFormat = tournament.format === 'single_elimination' || tournament.format === 'double_elimination';
+        let canRepechage = false;
+        let lastDefeatedName: string | undefined;
+        
+        if (isEliminationFormat) {
+          // Chercher le dernier match gagné par ce joueur
+          const wonMatches = tournament.matches
+            .filter(m => 
+              m.status === 'completed' && 
+              m.winnerId === selectedParticipant.id &&
+              m.participant1Id && m.participant2Id
+            )
+            .sort((a, b) => b.round - a.round);
+          
+          if (wonMatches.length > 0) {
+            canRepechage = true;
+            const lastWonMatch = wonMatches[0];
+            const defeatedId = lastWonMatch.participant1Id === selectedParticipant.id 
+              ? lastWonMatch.participant2Id 
+              : lastWonMatch.participant1Id;
+            const defeatedParticipant = tournament.participants.find(p => p.id === defeatedId);
+            lastDefeatedName = defeatedParticipant?.name;
+          }
+        }
+        
+        return (
+          <ParticipantManagementModal
+            participant={selectedParticipant}
+            penalties={tournament.penalties || []}
+            status={tournament.participantStatuses?.find(s => s.participantId === selectedParticipant.id)}
+            tournamentFormat={tournament.format}
+            canRepechage={canRepechage}
+            lastDefeatedName={lastDefeatedName}
+            onAddPenalty={(points, reason) => {
+              addPenalty(tournament.id, selectedParticipant.id, points, reason);
+            }}
+            onRemovePenalty={(penaltyId) => {
+              removePenalty(tournament.id, penaltyId);
+            }}
+            onEliminate={(reason, useRepechage) => {
+              eliminateParticipant(tournament.id, selectedParticipant.id, reason, useRepechage);
+              setSelectedParticipant(null);
+            }}
+            onReinstate={() => {
+              reinstateParticipant(tournament.id, selectedParticipant.id);
+            }}
+            onClose={() => setSelectedParticipant(null)}
+          />
+        );
+      })()}
     </div>
   );
 }

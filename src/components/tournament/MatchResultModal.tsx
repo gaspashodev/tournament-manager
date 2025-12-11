@@ -1,43 +1,58 @@
-import { useState } from 'react';
-import { X, Trophy, Timer } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { X, Trophy, Timer, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
-import type { Match, Participant } from '@/types';
+import type { Match, Participant, ScoreHistory } from '@/types';
 
 interface MatchResultModalProps {
   match: Match;
   participants: Participant[];
-  onSubmit: (winnerId: string, score1: number, score2: number) => void;
+  onSubmit: (winnerId: string | undefined, score1: number, score2: number) => void;
   onClose: () => void;
+  highScoreWins?: boolean;
 }
 
-export function MatchResultModal({ match, participants, onSubmit, onClose }: MatchResultModalProps) {
-  const [score1, setScore1] = useState(0);
-  const [score2, setScore2] = useState(0);
-  const [selectedWinner, setSelectedWinner] = useState<string | null>(null);
+export function MatchResultModal({ 
+  match, 
+  participants, 
+  onSubmit, 
+  onClose,
+  highScoreWins = true 
+}: MatchResultModalProps) {
+  const [score1, setScore1] = useState(match.score?.participant1Score ?? 0);
+  const [score2, setScore2] = useState(match.score?.participant2Score ?? 0);
+  const [selectedWinner, setSelectedWinner] = useState<string | undefined>(match.winnerId);
 
   const participant1 = participants.find(p => p.id === match.participant1Id);
   const participant2 = participants.find(p => p.id === match.participant2Id);
+  
+  const isModification = match.status === 'completed';
+
+  // Auto-select winner based on score and highScoreWins config
+  useEffect(() => {
+    if (score1 === score2) {
+      // En cas d'égalité, permettre la sélection manuelle
+      return;
+    }
+    
+    if (highScoreWins) {
+      setSelectedWinner(score1 > score2 ? match.participant1Id : match.participant2Id);
+    } else {
+      setSelectedWinner(score1 < score2 ? match.participant1Id : match.participant2Id);
+    }
+  }, [score1, score2, highScoreWins, match.participant1Id, match.participant2Id]);
 
   const handleSubmit = () => {
-    if (!selectedWinner) return;
     onSubmit(selectedWinner, score1, score2);
   };
 
-  // Auto-select winner based on score
-  const handleScoreChange = (isP1: boolean, value: number) => {
-    if (isP1) {
-      setScore1(value);
-      if (value > score2) setSelectedWinner(match.participant1Id!);
-      else if (value < score2) setSelectedWinner(match.participant2Id!);
-    } else {
-      setScore2(value);
-      if (score1 > value) setSelectedWinner(match.participant1Id!);
-      else if (score1 < value) setSelectedWinner(match.participant2Id!);
-    }
-  };
+  // Permettre de soumettre si :
+  // - Les scores sont différents (vainqueur auto) OU
+  // - Les scores sont égaux avec un vainqueur sélectionné OU  
+  // - Les scores sont égaux (match nul accepté)
+  const canSubmit = true; // On peut toujours soumettre, le match nul est valide
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -51,7 +66,9 @@ export function MatchResultModal({ match, participants, onSubmit, onClose }: Mat
       <div className="relative w-full max-w-md mx-4 rounded-2xl bg-card border shadow-2xl animate-scale-in">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b">
-          <h3 className="font-display text-lg font-semibold">Résultat du match</h3>
+          <h3 className="font-display text-lg font-semibold">
+            {isModification ? 'Modifier le résultat' : 'Résultat du match'}
+          </h3>
           <Button variant="ghost" size="icon" onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
@@ -59,6 +76,29 @@ export function MatchResultModal({ match, participants, onSubmit, onClose }: Mat
 
         {/* Content */}
         <div className="p-6 space-y-6">
+          {/* Modification warning */}
+          {isModification && (
+            <div className="flex items-center gap-2 p-3 rounded-lg bg-warning/10 text-warning text-sm">
+              <AlertCircle className="h-4 w-4 flex-shrink-0" />
+              <span>Vous modifiez un score existant. L'ancien score sera conservé dans l'historique.</span>
+            </div>
+          )}
+          
+          {/* Score history */}
+          {match.scoreHistory && match.scoreHistory.length > 0 && (
+            <div className="p-3 rounded-lg bg-muted/50 text-sm">
+              <p className="font-medium mb-1">Historique des modifications :</p>
+              {match.scoreHistory.map((h: ScoreHistory, i: number) => (
+                <p key={i} className="text-muted-foreground">
+                  {h.previousScore.participant1Score} - {h.previousScore.participant2Score}
+                  <span className="ml-2 text-xs">
+                    ({new Date(h.modifiedAt).toLocaleDateString('fr-FR')})
+                  </span>
+                </p>
+              ))}
+            </div>
+          )}
+
           {/* Timer integration hint */}
           {match.timerRoomCode && (
             <div className="flex items-center gap-2 p-3 rounded-lg bg-primary/10 text-primary text-sm">
@@ -71,9 +111,15 @@ export function MatchResultModal({ match, participants, onSubmit, onClose }: Mat
           <div className="space-y-4">
             {/* Participant 1 */}
             <div 
-              onClick={() => setSelectedWinner(match.participant1Id!)}
+              onClick={() => {
+                if (score1 === score2) {
+                  // Toggle: si déjà sélectionné, désélectionner
+                  setSelectedWinner(prev => prev === match.participant1Id ? undefined : match.participant1Id);
+                }
+              }}
               className={cn(
-                "flex items-center gap-4 p-4 rounded-xl border-2 transition-all cursor-pointer",
+                "flex items-center gap-4 p-4 rounded-xl border-2 transition-all",
+                score1 === score2 ? "cursor-pointer" : "cursor-default",
                 selectedWinner === match.participant1Id 
                   ? "border-success bg-success/10"
                   : "border-transparent bg-muted/50 hover:border-muted-foreground/30"
@@ -97,7 +143,7 @@ export function MatchResultModal({ match, participants, onSubmit, onClose }: Mat
                   type="number"
                   min="0"
                   value={score1}
-                  onChange={e => handleScoreChange(true, parseInt(e.target.value) || 0)}
+                  onChange={e => setScore1(parseInt(e.target.value) || 0)}
                   className="w-20 text-center font-mono text-xl h-12"
                 />
               </div>
@@ -112,9 +158,15 @@ export function MatchResultModal({ match, participants, onSubmit, onClose }: Mat
 
             {/* Participant 2 */}
             <div 
-              onClick={() => setSelectedWinner(match.participant2Id!)}
+              onClick={() => {
+                if (score1 === score2) {
+                  // Toggle: si déjà sélectionné, désélectionner
+                  setSelectedWinner(prev => prev === match.participant2Id ? undefined : match.participant2Id);
+                }
+              }}
               className={cn(
-                "flex items-center gap-4 p-4 rounded-xl border-2 transition-all cursor-pointer",
+                "flex items-center gap-4 p-4 rounded-xl border-2 transition-all",
+                score1 === score2 ? "cursor-pointer" : "cursor-default",
                 selectedWinner === match.participant2Id 
                   ? "border-success bg-success/10"
                   : "border-transparent bg-muted/50 hover:border-muted-foreground/30"
@@ -138,7 +190,7 @@ export function MatchResultModal({ match, participants, onSubmit, onClose }: Mat
                   type="number"
                   min="0"
                   value={score2}
-                  onChange={e => handleScoreChange(false, parseInt(e.target.value) || 0)}
+                  onChange={e => setScore2(parseInt(e.target.value) || 0)}
                   className="w-20 text-center font-mono text-xl h-12"
                 />
               </div>
@@ -146,9 +198,19 @@ export function MatchResultModal({ match, participants, onSubmit, onClose }: Mat
           </div>
 
           {/* Equal scores warning */}
-          {score1 === score2 && score1 > 0 && (
+          {score1 === score2 && (
             <p className="text-sm text-warning text-center">
-              Scores égaux - sélectionnez manuellement le vainqueur
+              {score1 > 0 
+                ? "Scores égaux - cliquez sur un joueur pour le désigner vainqueur (recliquez pour annuler)"
+                : "Entrez les scores des deux joueurs"
+              }
+            </p>
+          )}
+          
+          {/* High/Low score indicator */}
+          {!highScoreWins && (
+            <p className="text-xs text-muted-foreground text-center">
+              ⚙️ Le score le plus bas gagne (configuré pour ce tournoi)
             </p>
           )}
         </div>
@@ -160,10 +222,10 @@ export function MatchResultModal({ match, participants, onSubmit, onClose }: Mat
           </Button>
           <Button 
             onClick={handleSubmit} 
-            disabled={!selectedWinner}
+            disabled={!canSubmit}
             className="flex-1"
           >
-            Confirmer le résultat
+            {isModification ? 'Modifier' : 'Confirmer'}
           </Button>
         </div>
       </div>

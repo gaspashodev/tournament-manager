@@ -4,3 +4,5 @@ export * from './GroupStandingsTable';
 export * from './MatchList';
 export * from './ParticipantsList';
 export * from './MatchResultModal';
+export * from './WinnerSelectionModal';
+export * from './ParticipantManagementModal';

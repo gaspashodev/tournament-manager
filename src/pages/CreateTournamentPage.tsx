@@ -8,7 +8,11 @@ import {
   Medal,
   Settings2,
   Users,
-  Check
+  Check,
+  Trophy,
+  Plus,
+  Gift,
+  X
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -68,8 +72,25 @@ export function CreateTournamentPage() {
     pointsDraw: 1,
     pointsLoss: 0,
     homeAndAway: false,
-    bestOf: 1
+    bestOf: 1,
+    showScoreDetails: false,
+    highScoreWins: true,
+    useHeadToHead: true,
+    cashprize: undefined
   });
+  
+  // État pour le cashprize
+  const [enableCashprize, setEnableCashprize] = useState(false);
+  const [cashprizeTotal, setCashprizeTotal] = useState(1000);
+  const [cashprizeCurrency, setCashprizeCurrency] = useState<'€' | '£' | '$' | 'points'>('€');
+  const [cashprizeDistribution, setCashprizeDistribution] = useState<{ place: number; percent: number }[]>([
+    { place: 1, percent: 50 },
+    { place: 2, percent: 30 },
+    { place: 3, percent: 20 }
+  ]);
+  const [cashprizeRanges, setCashprizeRanges] = useState<{ startPlace: number; endPlace: number; percent: number }[]>([]);
+  const [materialPrizes, setMaterialPrizes] = useState<{ place: number; description: string }[]>([]);
+  const [materialPrizeRanges, setMaterialPrizeRanges] = useState<{ startPlace: number; endPlace: number; description: string }[]>([]);
 
   useEffect(() => {
     const urlFormat = searchParams.get('format') as TournamentFormat;
@@ -79,11 +100,24 @@ export function CreateTournamentPage() {
   }, [searchParams]);
 
   const handleCreate = () => {
+    // Construire la config finale avec cashprize si activé
+    const finalConfig = {
+      ...config,
+      cashprize: enableCashprize ? {
+        total: cashprizeTotal,
+        currency: cashprizeCurrency,
+        distribution: cashprizeDistribution,
+        ranges: cashprizeRanges,
+        materialPrizes: materialPrizes,
+        materialPrizeRanges: materialPrizeRanges
+      } : undefined
+    };
+    
     const tournament = createTournament({
       name,
       description,
       format,
-      config,
+      config: finalConfig,
       game: game || undefined,
       category: category || undefined
     });
@@ -281,6 +315,32 @@ export function CreateTournamentPage() {
               </Select>
             </div>
 
+            {/* Score mode settings */}
+            <div className="space-y-2">
+              <Label htmlFor="highScoreWins">Mode de victoire</Label>
+              <Select
+                id="highScoreWins"
+                value={config.highScoreWins ? 'high' : 'low'}
+                onChange={e => setConfig({ ...config, highScoreWins: e.target.value === 'high' })}
+              >
+                <SelectOption value="high">Le score le plus haut gagne</SelectOption>
+                <SelectOption value="low">Le score le plus bas gagne (ex: golf)</SelectOption>
+              </Select>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                id="showScoreDetails"
+                checked={config.showScoreDetails}
+                onChange={e => setConfig({ ...config, showScoreDetails: e.target.checked })}
+                className="h-4 w-4 rounded border-input"
+              />
+              <Label htmlFor="showScoreDetails" className="cursor-pointer">
+                Afficher les scores détaillés (BP/BC) - pour les sports
+              </Label>
+            </div>
+
             {/* Single/Double elimination settings */}
             {(format === 'single_elimination' || format === 'double_elimination') && (
               <div className="flex items-center gap-3">
@@ -363,19 +423,421 @@ export function CreateTournamentPage() {
 
             {/* Championship settings */}
             {format === 'championship' && (
-              <div className="flex items-center gap-3">
+              <>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    id="homeAway"
+                    checked={config.homeAndAway}
+                    onChange={e => setConfig({ ...config, homeAndAway: e.target.checked })}
+                    className="h-4 w-4 rounded border-input"
+                  />
+                  <Label htmlFor="homeAway" className="cursor-pointer">
+                    Matchs aller-retour
+                  </Label>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="pointsWinChamp">Points victoire</Label>
+                    <Input
+                      id="pointsWinChamp"
+                      type="number"
+                      min="0"
+                      value={config.pointsWin}
+                      onChange={e => setConfig({ ...config, pointsWin: parseInt(e.target.value) || 0 })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="pointsDrawChamp">Points nul</Label>
+                    <Input
+                      id="pointsDrawChamp"
+                      type="number"
+                      min="0"
+                      value={config.pointsDraw}
+                      onChange={e => setConfig({ ...config, pointsDraw: parseInt(e.target.value) || 0 })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="pointsLossChamp">Points défaite</Label>
+                    <Input
+                      id="pointsLossChamp"
+                      type="number"
+                      min="0"
+                      value={config.pointsLoss}
+                      onChange={e => setConfig({ ...config, pointsLoss: parseInt(e.target.value) || 0 })}
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Head-to-head option for groups and championship */}
+            {(format === 'groups' || format === 'championship') && (
+              <div className="flex items-center gap-3 pt-2 border-t">
                 <input
                   type="checkbox"
-                  id="homeAway"
-                  checked={config.homeAndAway}
-                  onChange={e => setConfig({ ...config, homeAndAway: e.target.checked })}
+                  id="useHeadToHead"
+                  checked={config.useHeadToHead}
+                  onChange={e => setConfig({ ...config, useHeadToHead: e.target.checked })}
                   className="h-4 w-4 rounded border-input"
                 />
-                <Label htmlFor="homeAway" className="cursor-pointer">
-                  Matchs aller-retour
+                <Label htmlFor="useHeadToHead" className="cursor-pointer">
+                  Confrontation directe en cas d'égalité
                 </Label>
               </div>
             )}
+
+            {/* Cashprize section */}
+            <div className="space-y-4 pt-4 border-t">
+              <div className="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  id="enableCashprize"
+                  checked={enableCashprize}
+                  onChange={e => setEnableCashprize(e.target.checked)}
+                  className="h-4 w-4 rounded border-input"
+                />
+                <Label htmlFor="enableCashprize" className="cursor-pointer flex items-center gap-2">
+                  <Trophy className="h-4 w-4 text-warning" />
+                  Activer le cashprize / récompenses
+                </Label>
+              </div>
+
+              {enableCashprize && (
+                <div className="space-y-6 p-4 rounded-lg bg-muted/50">
+                  {/* Montant total et devise */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="cashprizeTotal">Montant total</Label>
+                      <Input
+                        id="cashprizeTotal"
+                        type="number"
+                        min="0"
+                        value={cashprizeTotal}
+                        onChange={e => setCashprizeTotal(parseInt(e.target.value) || 0)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="cashprizeCurrency">Unité</Label>
+                      <Select
+                        id="cashprizeCurrency"
+                        value={cashprizeCurrency}
+                        onChange={e => setCashprizeCurrency(e.target.value as '€' | '£' | '$' | 'points')}
+                      >
+                        <SelectOption value="€">Euro (€)</SelectOption>
+                        <SelectOption value="$">Dollar ($)</SelectOption>
+                        <SelectOption value="£">Livre (£)</SelectOption>
+                        <SelectOption value="points">Points</SelectOption>
+                      </Select>
+                    </div>
+                  </div>
+
+                  {/* Distribution individuelle par place */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="flex items-center gap-2">
+                        <Trophy className="h-4 w-4" />
+                        Répartition par place
+                      </Label>
+                      <Button 
+                        type="button" 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => {
+                          const nextPlace = cashprizeDistribution.length > 0 
+                            ? Math.max(...cashprizeDistribution.map(d => d.place)) + 1 
+                            : 1;
+                          setCashprizeDistribution([...cashprizeDistribution, { place: nextPlace, percent: 0 }]);
+                        }}
+                      >
+                        <Plus className="h-4 w-4 mr-1" />
+                        Place
+                      </Button>
+                    </div>
+                    
+                    {cashprizeDistribution.map((item, index) => (
+                      <div key={index} className="flex items-center gap-2">
+                        <Input
+                          type="number"
+                          min="1"
+                          value={item.place}
+                          onChange={e => {
+                            const newDist = [...cashprizeDistribution];
+                            newDist[index] = { ...item, place: parseInt(e.target.value) || 1 };
+                            setCashprizeDistribution(newDist);
+                          }}
+                          className="w-16"
+                        />
+                        <span className="text-sm text-muted-foreground">
+                          {item.place === 1 ? 'er' : 'ème'}
+                        </span>
+                        <Input
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={item.percent}
+                          onChange={e => {
+                            const newDist = [...cashprizeDistribution];
+                            newDist[index] = { ...item, percent: parseInt(e.target.value) || 0 };
+                            setCashprizeDistribution(newDist);
+                          }}
+                          className="w-20"
+                        />
+                        <span className="text-muted-foreground">%</span>
+                        <span className="text-sm font-medium flex-1">
+                          = {Math.round(cashprizeTotal * item.percent / 100)} {cashprizeCurrency}
+                        </span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setCashprizeDistribution(cashprizeDistribution.filter((_, i) => i !== index))}
+                        >
+                          <X className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Répartition par plage */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="flex items-center gap-2">
+                        <Users className="h-4 w-4" />
+                        Répartition par plage
+                      </Label>
+                      <Button 
+                        type="button" 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => {
+                          setCashprizeRanges([...cashprizeRanges, { startPlace: 4, endPlace: 10, percent: 0 }]);
+                        }}
+                      >
+                        <Plus className="h-4 w-4 mr-1" />
+                        Plage
+                      </Button>
+                    </div>
+                    
+                    {cashprizeRanges.map((range, index) => (
+                      <div key={index} className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm text-muted-foreground">Du</span>
+                        <Input
+                          type="number"
+                          min="1"
+                          value={range.startPlace}
+                          onChange={e => {
+                            const newRanges = [...cashprizeRanges];
+                            newRanges[index] = { ...range, startPlace: parseInt(e.target.value) || 1 };
+                            setCashprizeRanges(newRanges);
+                          }}
+                          className="w-16"
+                        />
+                        <span className="text-sm text-muted-foreground">au</span>
+                        <Input
+                          type="number"
+                          min="1"
+                          value={range.endPlace}
+                          onChange={e => {
+                            const newRanges = [...cashprizeRanges];
+                            newRanges[index] = { ...range, endPlace: parseInt(e.target.value) || 1 };
+                            setCashprizeRanges(newRanges);
+                          }}
+                          className="w-16"
+                        />
+                        <span className="text-sm text-muted-foreground">:</span>
+                        <Input
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={range.percent}
+                          onChange={e => {
+                            const newRanges = [...cashprizeRanges];
+                            newRanges[index] = { ...range, percent: parseInt(e.target.value) || 0 };
+                            setCashprizeRanges(newRanges);
+                          }}
+                          className="w-20"
+                        />
+                        <span className="text-muted-foreground">%</span>
+                        <span className="text-xs text-muted-foreground">
+                          ({Math.round(cashprizeTotal * range.percent / 100)} {cashprizeCurrency} 
+                          = {Math.round(cashprizeTotal * range.percent / 100 / (range.endPlace - range.startPlace + 1))}/joueur)
+                        </span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setCashprizeRanges(cashprizeRanges.filter((_, i) => i !== index))}
+                        >
+                          <X className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </div>
+                    ))}
+                    
+                    {cashprizeRanges.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        Ex: 10% à répartir entre le 6ème et le 30ème
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Lots matériels */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="flex items-center gap-2">
+                        <Gift className="h-4 w-4" />
+                        Lots matériels
+                      </Label>
+                      <Button 
+                        type="button" 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => {
+                          const nextPlace = materialPrizes.length > 0 
+                            ? Math.max(...materialPrizes.map(p => p.place)) + 1 
+                            : 1;
+                          setMaterialPrizes([...materialPrizes, { place: nextPlace, description: '' }]);
+                        }}
+                      >
+                        <Plus className="h-4 w-4 mr-1" />
+                        Lot
+                      </Button>
+                    </div>
+                    
+                    {materialPrizes.map((prize, index) => (
+                      <div key={index} className="flex items-center gap-2">
+                        <Input
+                          type="number"
+                          min="1"
+                          value={prize.place}
+                          onChange={e => {
+                            const newPrizes = [...materialPrizes];
+                            newPrizes[index] = { ...prize, place: parseInt(e.target.value) || 1 };
+                            setMaterialPrizes(newPrizes);
+                          }}
+                          className="w-16"
+                        />
+                        <span className="text-sm text-muted-foreground">
+                          {prize.place === 1 ? 'er' : 'ème'}
+                        </span>
+                        <Input
+                          type="text"
+                          placeholder="Description du lot..."
+                          value={prize.description}
+                          onChange={e => {
+                            const newPrizes = [...materialPrizes];
+                            newPrizes[index] = { ...prize, description: e.target.value };
+                            setMaterialPrizes(newPrizes);
+                          }}
+                          className="flex-1"
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setMaterialPrizes(materialPrizes.filter((_, i) => i !== index))}
+                        >
+                          <X className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </div>
+                    ))}
+                    
+                    {materialPrizes.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        Ex: Trophée, médaille, bon d'achat...
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Lots matériels par plage */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="flex items-center gap-2">
+                        <Gift className="h-4 w-4" />
+                        Lots par plage
+                      </Label>
+                      <Button 
+                        type="button" 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => {
+                          setMaterialPrizeRanges([...materialPrizeRanges, { startPlace: 4, endPlace: 10, description: '' }]);
+                        }}
+                      >
+                        <Plus className="h-4 w-4 mr-1" />
+                        Plage
+                      </Button>
+                    </div>
+                    
+                    {materialPrizeRanges.map((range, index) => (
+                      <div key={index} className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm text-muted-foreground">Du</span>
+                        <Input
+                          type="number"
+                          min="1"
+                          value={range.startPlace}
+                          onChange={e => {
+                            const newRanges = [...materialPrizeRanges];
+                            newRanges[index] = { ...range, startPlace: parseInt(e.target.value) || 1 };
+                            setMaterialPrizeRanges(newRanges);
+                          }}
+                          className="w-16"
+                        />
+                        <span className="text-sm text-muted-foreground">au</span>
+                        <Input
+                          type="number"
+                          min="1"
+                          value={range.endPlace}
+                          onChange={e => {
+                            const newRanges = [...materialPrizeRanges];
+                            newRanges[index] = { ...range, endPlace: parseInt(e.target.value) || 1 };
+                            setMaterialPrizeRanges(newRanges);
+                          }}
+                          className="w-16"
+                        />
+                        <Input
+                          type="text"
+                          placeholder="Description du lot..."
+                          value={range.description}
+                          onChange={e => {
+                            const newRanges = [...materialPrizeRanges];
+                            newRanges[index] = { ...range, description: e.target.value };
+                            setMaterialPrizeRanges(newRanges);
+                          }}
+                          className="flex-1 min-w-32"
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setMaterialPrizeRanges(materialPrizeRanges.filter((_, i) => i !== index))}
+                        >
+                          <X className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </div>
+                    ))}
+                    
+                    {materialPrizeRanges.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        Ex: Du 4ème au 10ème : Goodies
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Total des pourcentages */}
+                  {(() => {
+                    const totalPercent = cashprizeDistribution.reduce((a, b) => a + b.percent, 0) +
+                                        cashprizeRanges.reduce((a, b) => a + b.percent, 0);
+                    return totalPercent !== 100 && totalPercent > 0 && (
+                      <p className="text-xs text-warning">
+                        ⚠️ Total : {totalPercent}% (devrait être 100%)
+                      </p>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
           </CardContent>
         </Card>
       )}
