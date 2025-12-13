@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, X, GripVertical, Trophy, Settings, AlertTriangle, Ban } from 'lucide-react';
+import { Plus, X, GripVertical, Trophy, Settings, AlertTriangle, Ban, ChevronUp, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -7,28 +7,34 @@ import type { Participant, Penalty, ParticipantStatus } from '@/types';
 
 interface ParticipantsListProps {
   participants: Participant[];
-  onAdd: (name: string) => void;
-  onRemove: (id: string) => void;
+  onAdd: (name: string) => void | Promise<void>;
+  onRemove: (id: string) => void | Promise<void>;
+  onUpdateSeed?: (participantId: string, newSeed: number) => void;
   canAdd?: boolean;
   canRemove?: boolean;
+  canEditSeeds?: boolean;
   winnerId?: string;
   penalties?: Penalty[];
   participantStatuses?: ParticipantStatus[];
   onManageParticipant?: (participant: Participant) => void;
   showManagement?: boolean;
+  seedingMode?: 'random' | 'manual' | 'ranked';
 }
 
 export function ParticipantsList({ 
   participants, 
   onAdd, 
   onRemove, 
+  onUpdateSeed,
   canAdd = true,
   canRemove = true,
+  canEditSeeds = false,
   winnerId,
   penalties = [],
   participantStatuses = [],
   onManageParticipant,
-  showManagement = false
+  showManagement = false,
+  seedingMode = 'random'
 }: ParticipantsListProps) {
   const [newName, setNewName] = useState('');
 
@@ -56,8 +62,40 @@ export function ParticipantsList({
     return status?.isEliminated || false;
   };
 
+  // Déplacer un participant vers le haut (diminuer le seed)
+  const moveSeedUp = (participant: Participant) => {
+    if (!onUpdateSeed || !participant.seed || participant.seed <= 1) return;
+    // Le contexte gère le swap atomique
+    onUpdateSeed(participant.id, participant.seed - 1);
+  };
+
+  // Déplacer un participant vers le bas (augmenter le seed)
+  const moveSeedDown = (participant: Participant) => {
+    if (!onUpdateSeed || !participant.seed || participant.seed >= participants.length) return;
+    // Le contexte gère le swap atomique
+    onUpdateSeed(participant.id, participant.seed + 1);
+  };
+
+  // Trier par seed
+  const sortedParticipants = [...participants].sort((a, b) => {
+    if (a.seed !== undefined && b.seed !== undefined) return a.seed - b.seed;
+    if (a.seed !== undefined) return -1;
+    if (b.seed !== undefined) return 1;
+    return 0;
+  });
+
   return (
     <div className="space-y-4">
+      {/* Indication du mode de seeding */}
+      {seedingMode !== 'random' && canEditSeeds && (
+        <div className="flex items-center gap-2 p-2 rounded-lg bg-primary/10 text-primary text-sm">
+          <span className="font-medium">
+            {seedingMode === 'manual' ? 'Seeding manuel' : 'Seeding par classement'}
+          </span>
+          <span className="text-muted-foreground">• Utilisez les flèches pour réorganiser</span>
+        </div>
+      )}
+
       {/* Add participant form */}
       {canAdd && (
         <div className="flex gap-2">
@@ -83,7 +121,7 @@ export function ParticipantsList({
             <p className="text-xs mt-1">Ajoutez des participants pour commencer</p>
           </div>
         ) : (
-          participants.map((participant, index) => {
+          sortedParticipants.map((participant, index) => {
             const isEliminated = isParticipantEliminated(participant.id);
             const participantPenalties = getParticipantPenalties(participant.id);
             const totalPenalty = participantPenalties.reduce((sum, p) => sum + p.points, 0);
@@ -97,12 +135,37 @@ export function ParticipantsList({
                   isEliminated && "border-destructive/30 bg-destructive/5 opacity-60"
                 )}
               >
-                {canRemove && (
+                {/* Contrôles de seed (si éditable) */}
+                {canEditSeeds && seedingMode !== 'random' && (
+                  <div className="flex flex-col">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 text-muted-foreground hover:text-primary"
+                      onClick={() => moveSeedUp(participant)}
+                      disabled={!participant.seed || participant.seed <= 1}
+                    >
+                      <ChevronUp className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 text-muted-foreground hover:text-primary"
+                      onClick={() => moveSeedDown(participant)}
+                      disabled={!participant.seed || participant.seed >= participants.length}
+                    >
+                      <ChevronDown className="h-4 w-4" />
+                    </Button>
+                  </div>
+                )}
+                
+                {canRemove && seedingMode === 'random' && (
                   <GripVertical className="h-4 w-4 text-muted-foreground cursor-grab" />
                 )}
                 
+                {/* Numéro de seed */}
                 <div className={cn(
-                  "flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium",
+                  "flex h-8 w-8 items-center justify-center rounded-full text-sm font-bold",
                   isEliminated 
                     ? "bg-destructive/20 text-destructive" 
                     : "bg-primary/10 text-primary"

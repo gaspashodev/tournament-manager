@@ -12,7 +12,9 @@ import {
   Trophy,
   Plus,
   Gift,
-  X
+  X,
+  Image as ImageIcon,
+  Loader2
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -20,6 +22,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectOption } from '@/components/ui/select';
 import { useTournament } from '@/context/TournamentContext';
+import { tournamentService } from '@/lib/tournament-service';
 import { cn } from '@/lib/utils';
 import type { TournamentFormat, TournamentConfig } from '@/types';
 
@@ -47,6 +50,12 @@ const formatOptions: { format: TournamentFormat; icon: typeof Swords; label: str
     icon: Medal,
     label: 'Championnat',
     description: 'Tous les participants s\'affrontent. Le meilleur bilan l\'emporte.'
+  },
+  {
+    format: 'swiss',
+    icon: Users,
+    label: 'Système suisse',
+    description: 'Plusieurs rondes où les joueurs de même niveau s\'affrontent. Pas d\'élimination.'
   }
 ];
 
@@ -92,6 +101,44 @@ export function CreateTournamentPage() {
   const [materialPrizes, setMaterialPrizes] = useState<{ place: number; description: string }[]>([]);
   const [materialPrizeRanges, setMaterialPrizeRanges] = useState<{ startPlace: number; endPlace: number; description: string }[]>([]);
 
+  // États pour les dates et inscriptions
+  const [scheduledStartDate, setScheduledStartDate] = useState<string>('');
+  const [registrationEndDate, setRegistrationEndDate] = useState<string>('');
+  const [registrationOpen, setRegistrationOpen] = useState(false);
+  
+  // État pour activer les Best-of
+  const [enableBestOf, setEnableBestOf] = useState(false);
+  
+  // État pour l'image du tournoi
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string>('');
+  const [isUploading, setIsUploading] = useState(false);
+
+  // Handler pour l'upload d'image
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      // Vérifier la taille (max 2MB)
+      if (file.size > 2 * 1024 * 1024) {
+        alert('Image trop grande. Maximum 2MB.');
+        return;
+      }
+      
+      // Stocker le fichier et créer un aperçu
+      setImageFile(file);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const removeImage = () => {
+    setImageFile(null);
+    setImagePreview('');
+  };
+
   useEffect(() => {
     const urlFormat = searchParams.get('format') as TournamentFormat;
     if (urlFormat && formatOptions.some(o => o.format === urlFormat)) {
@@ -99,29 +146,52 @@ export function CreateTournamentPage() {
     }
   }, [searchParams]);
 
-  const handleCreate = () => {
-    // Construire la config finale avec cashprize si activé
-    const finalConfig = {
-      ...config,
-      cashprize: enableCashprize ? {
-        total: cashprizeTotal,
-        currency: cashprizeCurrency,
-        distribution: cashprizeDistribution,
-        ranges: cashprizeRanges,
-        materialPrizes: materialPrizes,
-        materialPrizeRanges: materialPrizeRanges
-      } : undefined
-    };
+  const handleCreate = async () => {
+    setIsUploading(true);
     
-    const tournament = createTournament({
-      name,
-      description,
-      format,
-      config: finalConfig,
-      game: game || undefined,
-      category: category || undefined
-    });
-    navigate(`/tournaments/${tournament.id}`);
+    try {
+      // Construire la config finale avec cashprize si activé
+      const finalConfig = {
+        ...config,
+        cashprize: enableCashprize ? {
+          total: cashprizeTotal,
+          currency: cashprizeCurrency,
+          distribution: cashprizeDistribution,
+          ranges: cashprizeRanges,
+          materialPrizes: materialPrizes,
+          materialPrizeRanges: materialPrizeRanges
+        } : undefined
+      };
+      
+      // Créer le tournoi sans image d'abord
+      const tournament = await createTournament({
+        name,
+        description,
+        format,
+        config: finalConfig,
+        game: game || undefined,
+        category: category || undefined,
+        scheduledStartDate: scheduledStartDate ? new Date(scheduledStartDate) : undefined,
+        registrationEndDate: registrationEndDate ? new Date(registrationEndDate) : undefined,
+        registrationOpen
+      });
+
+      // Si une image est sélectionnée, l'uploader
+      if (imageFile && tournamentService.isConfigured()) {
+        const uploadedUrl = await tournamentService.uploadTournamentImage(imageFile, tournament.id);
+        if (uploadedUrl) {
+          // Mettre à jour le tournoi avec l'URL de l'image
+          await tournamentService.update(tournament.id, { imageUrl: uploadedUrl });
+        }
+      }
+
+      navigate(`/tournaments/${tournament.id}`);
+    } catch (error) {
+      console.error('Error creating tournament:', error);
+      alert('Erreur lors de la création du tournoi');
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   const canProceed = () => {
@@ -203,6 +273,50 @@ export function CreateTournamentPage() {
               />
             </div>
 
+            {/* Image du tournoi */}
+            <div className="space-y-2">
+              <Label htmlFor="tournamentImage">Image du tournoi (optionnel)</Label>
+              <div className="flex items-start gap-4">
+                {imagePreview ? (
+                  <div className="relative">
+                    <img 
+                      src={imagePreview} 
+                      alt="Aperçu" 
+                      className="w-32 h-32 object-cover rounded-lg border"
+                    />
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="icon"
+                      className="absolute -top-2 -right-2 h-6 w-6"
+                      onClick={removeImage}
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </div>
+                ) : (
+                  <label 
+                    htmlFor="tournamentImage"
+                    className="flex flex-col items-center justify-center w-32 h-32 border-2 border-dashed rounded-lg cursor-pointer hover:border-primary hover:bg-primary/5 transition-colors"
+                  >
+                    <ImageIcon className="h-8 w-8 text-muted-foreground" />
+                    <span className="text-xs text-muted-foreground mt-1">Ajouter</span>
+                  </label>
+                )}
+                <input
+                  id="tournamentImage"
+                  type="file"
+                  accept="image/*"
+                  onChange={handleImageUpload}
+                  className="hidden"
+                />
+                <div className="flex-1 text-sm text-muted-foreground">
+                  <p>Format: JPG, PNG, GIF</p>
+                  <p>Taille max: 2MB</p>
+                </div>
+              </div>
+            </div>
+
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="game">Jeu (optionnel)</Label>
@@ -222,6 +336,66 @@ export function CreateTournamentPage() {
                   onChange={e => setCategory(e.target.value)}
                 />
               </div>
+            </div>
+
+            {/* Dates */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="scheduledStartDate">Date de début (optionnel)</Label>
+                <Input
+                  id="scheduledStartDate"
+                  type="datetime-local"
+                  value={scheduledStartDate}
+                  min={new Date().toISOString().slice(0, 16)}
+                  onChange={e => {
+                    setScheduledStartDate(e.target.value);
+                    // Si la date de fin d'inscription est après la date de début, la réinitialiser
+                    if (registrationEndDate && e.target.value && new Date(registrationEndDate) >= new Date(e.target.value)) {
+                      setRegistrationEndDate('');
+                    }
+                  }}
+                />
+                {scheduledStartDate && new Date(scheduledStartDate) < new Date() && (
+                  <p className="text-xs text-destructive">La date de début ne peut pas être dans le passé</p>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="registrationEndDate">Fin des inscriptions (optionnel)</Label>
+                <Input
+                  id="registrationEndDate"
+                  type="datetime-local"
+                  value={registrationEndDate}
+                  min={new Date().toISOString().slice(0, 16)}
+                  max={scheduledStartDate || undefined}
+                  onChange={e => setRegistrationEndDate(e.target.value)}
+                  disabled={!scheduledStartDate}
+                />
+                {!scheduledStartDate && (
+                  <p className="text-xs text-muted-foreground">Définissez d'abord la date de début</p>
+                )}
+                {registrationEndDate && scheduledStartDate && new Date(registrationEndDate) >= new Date(scheduledStartDate) && (
+                  <p className="text-xs text-destructive">La fin des inscriptions doit être avant le début du tournoi</p>
+                )}
+              </div>
+            </div>
+
+            {/* Inscription libre */}
+            <div className="flex items-center justify-between p-4 rounded-lg bg-muted/50">
+              <div>
+                <Label htmlFor="registrationOpen" className="text-base font-medium">
+                  Inscription libre
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  Les joueurs peuvent s'inscrire eux-mêmes (sinon l'organisateur inscrit tout le monde)
+                </p>
+              </div>
+              <input
+                id="registrationOpen"
+                type="checkbox"
+                checked={registrationOpen}
+                onChange={e => setRegistrationOpen(e.target.checked)}
+                className="h-5 w-5 rounded border-gray-300"
+              />
             </div>
           </CardContent>
         </Card>
@@ -287,33 +461,164 @@ export function CreateTournamentPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            {/* Common settings */}
-            <div className="space-y-2">
-              <Label htmlFor="seeding">Méthode de seeding</Label>
-              <Select
-                id="seeding"
-                value={config.seeding}
-                onChange={e => setConfig({ ...config, seeding: e.target.value as 'random' | 'manual' | 'ranked' })}
-              >
-                <SelectOption value="random">Aléatoire</SelectOption>
-                <SelectOption value="manual">Manuel</SelectOption>
-                <SelectOption value="ranked">Par classement</SelectOption>
-              </Select>
+            {/* Seeding - seulement pour élimination et groupes */}
+            {format !== 'championship' && format !== 'swiss' && (
+              <div className="space-y-2">
+                <Label htmlFor="seeding">Méthode de seeding</Label>
+                <Select
+                  id="seeding"
+                  value={config.seeding}
+                  onChange={e => setConfig({ ...config, seeding: e.target.value as 'random' | 'manual' })}
+                >
+                  <SelectOption value="random">Aléatoire</SelectOption>
+                  <SelectOption value="manual">Manuel (définir l'ordre des têtes de série)</SelectOption>
+                </Select>
+                {config.seeding === 'manual' && (
+                  <p className="text-xs text-muted-foreground">
+                    Vous pourrez réorganiser l'ordre des participants après les avoir ajoutés
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Case à cocher pour activer les Best-of */}
+            <div className="flex items-center justify-between p-4 rounded-lg bg-muted/50">
+              <div>
+                <Label htmlFor="enableBestOf" className="text-base font-medium">
+                  Activer les Best-of
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  Permet de jouer plusieurs manches par match (ex: BO3, BO5)
+                </p>
+              </div>
+              <input
+                id="enableBestOf"
+                type="checkbox"
+                checked={enableBestOf}
+                onChange={e => {
+                  setEnableBestOf(e.target.checked);
+                  if (!e.target.checked) {
+                    // Réinitialiser les valeurs BO
+                    setConfig({ 
+                      ...config, 
+                      bestOf: 1, 
+                      bestOfFinal: undefined,
+                      bestOfGroups: undefined,
+                      bestOfPlayoffs: undefined,
+                      bestOfPlayoffsFinal: undefined
+                    });
+                  } else {
+                    setConfig({ ...config, bestOf: 3 }); // Par défaut BO3
+                  }
+                }}
+                className="h-5 w-5 rounded border-gray-300"
+              />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="bestOf">Nombre de manches (Best of)</Label>
-              <Select
-                id="bestOf"
-                value={String(config.bestOf)}
-                onChange={e => setConfig({ ...config, bestOf: parseInt(e.target.value) })}
-              >
-                <SelectOption value="1">1 manche (BO1)</SelectOption>
-                <SelectOption value="3">3 manches (BO3)</SelectOption>
-                <SelectOption value="5">5 manches (BO5)</SelectOption>
-                <SelectOption value="7">7 manches (BO7)</SelectOption>
-              </Select>
-            </div>
+            {/* Options Best-of (conditionnées) */}
+            {enableBestOf && (
+              <div className="space-y-4 p-4 rounded-lg border bg-card">
+                <div className="space-y-2">
+                  <Label htmlFor="bestOf">Best-of par défaut</Label>
+                  <Select
+                    id="bestOf"
+                    value={String(config.bestOf)}
+                    onChange={e => setConfig({ ...config, bestOf: parseInt(e.target.value) })}
+                  >
+                    <SelectOption value="3">3 manches (BO3)</SelectOption>
+                    <SelectOption value="5">5 manches (BO5)</SelectOption>
+                    <SelectOption value="7">7 manches (BO7)</SelectOption>
+                  </Select>
+                </div>
+
+                {/* BO pour la finale - Élimination simple/double */}
+                {(format === 'single_elimination' || format === 'double_elimination') && (
+                  <div className="space-y-2">
+                    <Label htmlFor="bestOfFinal">Best-of pour la finale</Label>
+                    <Select
+                      id="bestOfFinal"
+                      value={String(config.bestOfFinal || config.bestOf || 3)}
+                      onChange={e => {
+                        const val = parseInt(e.target.value);
+                        setConfig({ 
+                          ...config, 
+                          bestOfFinal: val === (config.bestOf || 3) ? undefined : val 
+                        });
+                      }}
+                    >
+                      <SelectOption value="3">3 manches (BO3)</SelectOption>
+                      <SelectOption value="5">5 manches (BO5)</SelectOption>
+                      <SelectOption value="7">7 manches (BO7)</SelectOption>
+                    </Select>
+                    {config.bestOfFinal && config.bestOfFinal !== config.bestOf && (
+                      <p className="text-xs text-primary">La finale se jouera en BO{config.bestOfFinal}</p>
+                    )}
+                  </div>
+                )}
+
+                {/* BO par phase - Groupes */}
+                {format === 'groups' && (
+                  <>
+                    <div className="space-y-2">
+                      <Label htmlFor="bestOfGroups">Best-of pour les matchs de groupe</Label>
+                      <Select
+                        id="bestOfGroups"
+                        value={String(config.bestOfGroups || config.bestOf || 3)}
+                        onChange={e => {
+                          const val = parseInt(e.target.value);
+                          setConfig({ 
+                            ...config, 
+                            bestOfGroups: val === (config.bestOf || 3) ? undefined : val 
+                          });
+                        }}
+                      >
+                        <SelectOption value="3">3 manches (BO3)</SelectOption>
+                        <SelectOption value="5">5 manches (BO5)</SelectOption>
+                        <SelectOption value="7">7 manches (BO7)</SelectOption>
+                      </Select>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      <Label htmlFor="bestOfPlayoffs">Best-of pour les playoffs</Label>
+                      <Select
+                        id="bestOfPlayoffs"
+                        value={String(config.bestOfPlayoffs || config.bestOf || 3)}
+                        onChange={e => {
+                          const val = parseInt(e.target.value);
+                          setConfig({ 
+                            ...config, 
+                            bestOfPlayoffs: val === (config.bestOf || 3) ? undefined : val 
+                          });
+                        }}
+                      >
+                        <SelectOption value="3">3 manches (BO3)</SelectOption>
+                        <SelectOption value="5">5 manches (BO5)</SelectOption>
+                        <SelectOption value="7">7 manches (BO7)</SelectOption>
+                      </Select>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      <Label htmlFor="bestOfPlayoffsFinal">Best-of pour la finale des playoffs</Label>
+                      <Select
+                        id="bestOfPlayoffsFinal"
+                        value={String(config.bestOfPlayoffsFinal || config.bestOfPlayoffs || config.bestOf || 3)}
+                        onChange={e => {
+                          const val = parseInt(e.target.value);
+                          setConfig({ 
+                            ...config, 
+                            bestOfPlayoffsFinal: val === (config.bestOfPlayoffs || config.bestOf || 3) ? undefined : val 
+                          });
+                        }}
+                      >
+                        <SelectOption value="3">3 manches (BO3)</SelectOption>
+                        <SelectOption value="5">5 manches (BO5)</SelectOption>
+                        <SelectOption value="7">7 manches (BO7)</SelectOption>
+                      </Select>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
 
             {/* Score mode settings */}
             <div className="space-y-2">
@@ -393,8 +698,9 @@ export function CreateTournamentPage() {
                       id="pointsWin"
                       type="number"
                       min="0"
+                      step="0.5"
                       value={config.pointsWin}
-                      onChange={e => setConfig({ ...config, pointsWin: parseInt(e.target.value) || 0 })}
+                      onChange={e => setConfig({ ...config, pointsWin: parseFloat(e.target.value) || 0 })}
                     />
                   </div>
                   <div className="space-y-2">
@@ -403,8 +709,9 @@ export function CreateTournamentPage() {
                       id="pointsDraw"
                       type="number"
                       min="0"
+                      step="0.5"
                       value={config.pointsDraw}
-                      onChange={e => setConfig({ ...config, pointsDraw: parseInt(e.target.value) || 0 })}
+                      onChange={e => setConfig({ ...config, pointsDraw: parseFloat(e.target.value) || 0 })}
                     />
                   </div>
                   <div className="space-y-2">
@@ -413,8 +720,9 @@ export function CreateTournamentPage() {
                       id="pointsLoss"
                       type="number"
                       min="0"
+                      step="0.5"
                       value={config.pointsLoss}
-                      onChange={e => setConfig({ ...config, pointsLoss: parseInt(e.target.value) || 0 })}
+                      onChange={e => setConfig({ ...config, pointsLoss: parseFloat(e.target.value) || 0 })}
                     />
                   </div>
                 </div>
@@ -444,8 +752,9 @@ export function CreateTournamentPage() {
                       id="pointsWinChamp"
                       type="number"
                       min="0"
+                      step="0.5"
                       value={config.pointsWin}
-                      onChange={e => setConfig({ ...config, pointsWin: parseInt(e.target.value) || 0 })}
+                      onChange={e => setConfig({ ...config, pointsWin: parseFloat(e.target.value) || 0 })}
                     />
                   </div>
                   <div className="space-y-2">
@@ -454,8 +763,9 @@ export function CreateTournamentPage() {
                       id="pointsDrawChamp"
                       type="number"
                       min="0"
+                      step="0.5"
                       value={config.pointsDraw}
-                      onChange={e => setConfig({ ...config, pointsDraw: parseInt(e.target.value) || 0 })}
+                      onChange={e => setConfig({ ...config, pointsDraw: parseFloat(e.target.value) || 0 })}
                     />
                   </div>
                   <div className="space-y-2">
@@ -464,10 +774,106 @@ export function CreateTournamentPage() {
                       id="pointsLossChamp"
                       type="number"
                       min="0"
+                      step="0.5"
                       value={config.pointsLoss}
-                      onChange={e => setConfig({ ...config, pointsLoss: parseInt(e.target.value) || 0 })}
+                      onChange={e => setConfig({ ...config, pointsLoss: parseFloat(e.target.value) || 0 })}
                     />
                   </div>
+                </div>
+              </>
+            )}
+
+            {/* Swiss settings */}
+            {format === 'swiss' && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="swissRounds">Nombre de rondes</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="swissRounds"
+                      type="number"
+                      min="1"
+                      max="15"
+                      placeholder="Auto"
+                      value={config.swissRounds || ''}
+                      onChange={e => setConfig({ 
+                        ...config, 
+                        swissRounds: e.target.value ? parseInt(e.target.value) : undefined 
+                      })}
+                      className="flex-1"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setConfig({ ...config, swissRounds: undefined })}
+                      disabled={!config.swissRounds}
+                    >
+                      Auto
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Auto = log₂ du nombre de participants (ex: 8 joueurs → 3 rondes)
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    id="swissAvoidRematches"
+                    checked={config.swissAvoidRematches !== false}
+                    onChange={e => setConfig({ ...config, swissAvoidRematches: e.target.checked })}
+                    className="h-4 w-4 rounded border-input"
+                  />
+                  <Label htmlFor="swissAvoidRematches" className="cursor-pointer">
+                    Éviter les re-matchs (recommandé)
+                  </Label>
+                </div>
+
+                {/* Points configuration for Swiss */}
+                <div className="grid grid-cols-3 gap-4 p-4 rounded-lg border bg-card">
+                  <div className="space-y-2">
+                    <Label htmlFor="pointsWinSwiss">Points victoire</Label>
+                    <Input
+                      id="pointsWinSwiss"
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      value={config.pointsWin}
+                      onChange={e => setConfig({ ...config, pointsWin: parseFloat(e.target.value) || 0 })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="pointsDrawSwiss">Points nul</Label>
+                    <Input
+                      id="pointsDrawSwiss"
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      value={config.pointsDraw}
+                      onChange={e => setConfig({ ...config, pointsDraw: parseFloat(e.target.value) || 0 })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="pointsLossSwiss">Points défaite</Label>
+                    <Input
+                      id="pointsLossSwiss"
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      value={config.pointsLoss}
+                      onChange={e => setConfig({ ...config, pointsLoss: parseFloat(e.target.value) || 0 })}
+                    />
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+                  <p className="font-medium text-foreground mb-2">Comment ça marche ?</p>
+                  <ul className="list-disc list-inside space-y-1">
+                    <li>Tous les joueurs jouent à chaque ronde</li>
+                    <li>Les joueurs avec des scores similaires s'affrontent</li>
+                    <li>Le classement final est basé sur le nombre de points</li>
+                    <li>Pas d'élimination : tout le monde joue jusqu'à la fin</li>
+                  </ul>
                 </div>
               </>
             )}
@@ -856,8 +1262,15 @@ export function CreateTournamentPage() {
             Suivant
           </Button>
         ) : (
-          <Button onClick={handleCreate} disabled={!canProceed()}>
-            Créer le tournoi
+          <Button onClick={handleCreate} disabled={!canProceed() || isUploading}>
+            {isUploading ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Création...
+              </>
+            ) : (
+              'Créer le tournoi'
+            )}
           </Button>
         )}
       </div>

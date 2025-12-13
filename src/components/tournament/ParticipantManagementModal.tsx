@@ -45,12 +45,12 @@ export function ParticipantManagementModal({
   const isEliminated = status?.isEliminated;
 
   // Déterminer quelles options afficher selon le format
-  const showPenalties = tournamentFormat === 'championship' || tournamentFormat === 'groups';
+  const showPenalties = tournamentFormat === 'championship' || tournamentFormat === 'groups' || tournamentFormat === 'swiss';
   const showElimination = tournamentFormat === 'single_elimination' || tournamentFormat === 'double_elimination' || tournamentFormat === 'groups';
   const isEliminationFormat = tournamentFormat === 'single_elimination' || tournamentFormat === 'double_elimination';
 
   const handleAddPenalty = () => {
-    if (penaltyPoints > 0 && penaltyReason.trim()) {
+    if (penaltyPoints >= 0.5 && penaltyReason.trim()) {
       onAddPenalty(penaltyPoints, penaltyReason.trim());
       setPenaltyPoints(1);
       setPenaltyReason('');
@@ -149,15 +149,16 @@ export function ParticipantManagementModal({
                       variant="outline"
                       size="icon"
                       className="h-8 w-8"
-                      onClick={() => setPenaltyPoints(Math.max(1, penaltyPoints - 1))}
+                      onClick={() => setPenaltyPoints(Math.max(0.5, penaltyPoints - 0.5))}
                     >
                       <Minus className="h-3 w-3" />
                     </Button>
                     <Input
                       type="number"
-                      min="1"
+                      min="0.5"
+                      step="0.5"
                       value={penaltyPoints}
-                      onChange={e => setPenaltyPoints(Math.max(1, parseInt(e.target.value) || 1))}
+                      onChange={e => setPenaltyPoints(Math.max(0.5, parseFloat(e.target.value) || 0.5))}
                       className="w-16 text-center"
                     />
                     <Button
@@ -165,7 +166,7 @@ export function ParticipantManagementModal({
                       variant="outline"
                       size="icon"
                       className="h-8 w-8"
-                      onClick={() => setPenaltyPoints(penaltyPoints + 1)}
+                      onClick={() => setPenaltyPoints(penaltyPoints + 0.5)}
                     >
                       <Plus className="h-3 w-3" />
                     </Button>
@@ -180,7 +181,7 @@ export function ParticipantManagementModal({
                 />
                 <Button
                   onClick={handleAddPenalty}
-                  disabled={!penaltyReason.trim() || penaltyPoints < 1}
+                  disabled={!penaltyReason.trim() || penaltyPoints < 0.5}
                   className="w-full"
                   variant="warning"
                 >

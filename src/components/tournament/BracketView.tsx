@@ -29,9 +29,10 @@ function MatchCard({ match, participants, participantStatuses = [], onClick }: M
     s => s.participantId === match.participant2Id && s.isEliminated
   );
   
-  // Cliquable si pending ou completed (pour modifier)
-  const isClickable = (match.status === 'pending' || match.status === 'completed') && participant1 && participant2;
+  // Cliquable si pending, in_progress ou completed (pour modifier)
+  const isClickable = (match.status === 'pending' || match.status === 'in_progress' || match.status === 'completed') && participant1 && participant2;
   const isCompleted = match.status === 'completed';
+  const isInProgress = match.status === 'in_progress';
   
   // Vérifier si c'est un match de forfait (sans repêchage)
   // Un forfait = élimination au premier tour où l'adversaire gagne automatiquement
@@ -47,6 +48,7 @@ function MatchCard({ match, participants, participantStatuses = [], onClick }: M
         "w-48 rounded-lg border bg-card shadow-sm transition-all duration-200",
         isClickable && "cursor-pointer hover:border-primary hover:shadow-md",
         isCompleted && !isForfeitMatch && "border-success/30 bg-success/5",
+        isInProgress && "border-warning/50 bg-warning/5 ring-2 ring-warning/30",
         isForfeitMatch && "border-destructive/30 bg-destructive/5"
       )}
     >
@@ -54,17 +56,18 @@ function MatchCard({ match, participants, participantStatuses = [], onClick }: M
       <div className={cn(
         "flex items-center gap-2 px-3 py-2 border-b",
         isCompleted && match.winnerId === match.participant1Id && !isForfeitMatch && "bg-success/10",
+        isInProgress && "bg-warning/5",
         isParticipant1Eliminated && "opacity-60"
       )}>
         <div className={cn(
-          "flex h-6 w-6 items-center justify-center rounded-full text-xs",
-          isParticipant1Eliminated ? "bg-destructive/20 text-destructive" : "bg-muted"
+          "flex h-6 w-6 items-center justify-center rounded-full text-xs font-medium",
+          isParticipant1Eliminated ? "bg-destructive/20 text-destructive" : "bg-primary/10 text-primary"
         )}>
           {participant1 ? (
             isParticipant1Eliminated ? (
               <Ban className="h-3 w-3" />
             ) : (
-              participant1.name.charAt(0).toUpperCase()
+              participant1.seed || '?'
             )
           ) : (
             <User className="h-3 w-3 text-muted-foreground" />
@@ -82,6 +85,7 @@ function MatchCard({ match, participants, participantStatuses = [], onClick }: M
           <span className={cn(
             "font-mono text-sm font-medium",
             match.winnerId === match.participant1Id && !isForfeitMatch && "text-success",
+            isInProgress && "text-warning",
             isParticipant1Eliminated && "text-destructive"
           )}>
             {match.score.participant1Score}
@@ -96,17 +100,18 @@ function MatchCard({ match, participants, participantStatuses = [], onClick }: M
       <div className={cn(
         "flex items-center gap-2 px-3 py-2",
         isCompleted && match.winnerId === match.participant2Id && !isForfeitMatch && "bg-success/10",
+        isInProgress && "bg-warning/5",
         isParticipant2Eliminated && "opacity-60"
       )}>
         <div className={cn(
-          "flex h-6 w-6 items-center justify-center rounded-full text-xs",
-          isParticipant2Eliminated ? "bg-destructive/20 text-destructive" : "bg-muted"
+          "flex h-6 w-6 items-center justify-center rounded-full text-xs font-medium",
+          isParticipant2Eliminated ? "bg-destructive/20 text-destructive" : "bg-primary/10 text-primary"
         )}>
           {participant2 ? (
             isParticipant2Eliminated ? (
               <Ban className="h-3 w-3" />
             ) : (
-              participant2.name.charAt(0).toUpperCase()
+              participant2.seed || '?'
             )
           ) : (
             <User className="h-3 w-3 text-muted-foreground" />
@@ -124,6 +129,7 @@ function MatchCard({ match, participants, participantStatuses = [], onClick }: M
           <span className={cn(
             "font-mono text-sm font-medium",
             match.winnerId === match.participant2Id && !isForfeitMatch && "text-success",
+            isInProgress && "text-warning",
             isParticipant2Eliminated && "text-destructive"
           )}>
             {match.score.participant2Score}
@@ -133,6 +139,13 @@ function MatchCard({ match, participants, participantStatuses = [], onClick }: M
           <Trophy className="h-3 w-3 text-success" />
         )}
       </div>
+      
+      {/* Badge En cours */}
+      {isInProgress && (
+        <div className="px-3 py-1 text-xs text-center text-warning bg-warning/10 border-t border-warning/20">
+          En cours
+        </div>
+      )}
       
       {/* Badge forfait */}
       {isForfeitMatch && (

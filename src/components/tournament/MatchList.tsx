@@ -44,8 +44,10 @@ export function MatchList({ matches, participants, participantStatuses = [], onM
         const p1Eliminated = isEliminated(match.participant1Id);
         const p2Eliminated = isEliminated(match.participant2Id);
         const isForfeit = isForfeitMatch(match);
-        // Cliquable si pending ou completed (pour modifier)
-        const isClickable = (match.status === 'pending' || match.status === 'completed') && p1 && p2;
+        // Détecter un bye (match sans participant2 mais avec un gagnant)
+        const isBye = !match.participant2Id && match.winnerId === match.participant1Id;
+        // Cliquable si pending, in_progress ou completed (pour modifier) ET pas un bye
+        const isClickable = (match.status === 'pending' || match.status === 'in_progress' || match.status === 'completed') && p1 && p2 && !isBye;
         
         return (
           <div
@@ -54,9 +56,10 @@ export function MatchList({ matches, participants, participantStatuses = [], onM
             className={cn(
               "flex items-center gap-4 rounded-xl border bg-card p-4 transition-all duration-200",
               isClickable && "cursor-pointer hover:border-primary hover:shadow-md",
-              match.status === 'completed' && !isForfeit && "border-success/30 bg-success/5",
+              match.status === 'completed' && !isForfeit && !isBye && "border-success/30 bg-success/5",
               match.status === 'in_progress' && "border-warning/30 bg-warning/5",
-              isForfeit && "border-destructive/30 bg-destructive/5"
+              isForfeit && "border-destructive/30 bg-destructive/5",
+              isBye && "border-muted bg-muted/30 opacity-70"
             )}
           >
             {/* Status icon */}
@@ -64,13 +67,15 @@ export function MatchList({ matches, participants, participantStatuses = [], onM
               "flex h-10 w-10 items-center justify-center rounded-lg",
               match.status === 'pending' && "bg-muted text-muted-foreground",
               match.status === 'in_progress' && "bg-warning/20 text-warning",
-              match.status === 'completed' && !isForfeit && "bg-success/20 text-success",
-              isForfeit && "bg-destructive/20 text-destructive"
+              match.status === 'completed' && !isForfeit && !isBye && "bg-success/20 text-success",
+              isForfeit && "bg-destructive/20 text-destructive",
+              isBye && "bg-muted text-muted-foreground"
             )}>
               {match.status === 'pending' && <Clock className="h-5 w-5" />}
               {match.status === 'in_progress' && <PlayCircle className="h-5 w-5" />}
-              {match.status === 'completed' && !isForfeit && <CheckCircle2 className="h-5 w-5" />}
+              {match.status === 'completed' && !isForfeit && !isBye && <CheckCircle2 className="h-5 w-5" />}
               {isForfeit && <Ban className="h-5 w-5" />}
+              {isBye && <CheckCircle2 className="h-5 w-5" />}
             </div>
             
             {/* Participants */}
@@ -134,16 +139,20 @@ export function MatchList({ matches, participants, participantStatuses = [], onM
                 )}>
                   <span className={cn(
                     "truncate text-right",
-                    p2Eliminated && "line-through text-muted-foreground"
+                    p2Eliminated && "line-through text-muted-foreground",
+                    isBye && "italic text-muted-foreground"
                   )}>
-                    {p2?.name || 'À déterminer'}
+                    {isBye ? 'Bye' : (p2?.name || 'À déterminer')}
                   </span>
                   <div className={cn(
                     "h-8 w-8 rounded-full flex items-center justify-center text-sm font-medium shrink-0",
-                    p2Eliminated ? "bg-destructive/10 text-destructive" : "bg-primary/10 text-primary"
+                    p2Eliminated ? "bg-destructive/10 text-destructive" : 
+                    isBye ? "bg-muted text-muted-foreground" : "bg-primary/10 text-primary"
                   )}>
                     {p2Eliminated ? (
                       <Ban className="h-4 w-4" />
+                    ) : isBye ? (
+                      '-'
                     ) : (
                       p2?.name.charAt(0).toUpperCase() || '?'
                     )}
@@ -156,6 +165,13 @@ export function MatchList({ matches, participants, participantStatuses = [], onM
             {isForfeit && (
               <Badge variant="destructive" className="text-xs">
                 Forfait
+              </Badge>
+            )}
+            
+            {/* Badge bye */}
+            {isBye && (
+              <Badge variant="secondary" className="text-xs">
+                Bye
               </Badge>
             )}
             

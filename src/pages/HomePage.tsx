@@ -6,6 +6,7 @@ import {
   GitBranch, 
   Grid3X3, 
   Medal,
+  Users,
   Sparkles
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -38,6 +39,12 @@ const formatOptions: { format: TournamentFormat; icon: typeof Trophy; label: str
     icon: Medal,
     label: 'Championnat',
     description: 'Tous contre tous'
+  },
+  {
+    format: 'swiss',
+    icon: Users,
+    label: 'Système suisse',
+    description: 'Rondes par niveau'
   }
 ];
 

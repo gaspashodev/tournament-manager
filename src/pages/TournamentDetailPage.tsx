@@ -8,7 +8,6 @@ import {
   Trophy,
   LayoutGrid,
   List,
-  Timer,
   Crown
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -21,12 +20,13 @@ import {
   GroupStandingsTable,
   MatchResultModal,
   WinnerSelectionModal,
-  ParticipantManagementModal
+  ParticipantManagementModal,
+  TournamentHistory
 } from '@/components/tournament';
 import { useTournament } from '@/context/TournamentContext';
 import type { Match, TournamentStatus, Participant } from '@/types';
 
-type ViewMode = 'bracket' | 'list' | 'groups';
+type ViewMode = 'bracket' | 'list' | 'standings';
 
 const statusLabels: Record<TournamentStatus, string> = {
   draft: 'Brouillon',
@@ -44,6 +44,7 @@ export function TournamentDetailPage() {
     addParticipant, 
     removeParticipant,
     generateBracket,
+    generateSwissNextRound,
     startTournament,
     submitMatchResult,
     deleteTournament,
@@ -51,19 +52,31 @@ export function TournamentDetailPage() {
     addPenalty,
     removePenalty,
     eliminateParticipant,
-    reinstateParticipant
+    reinstateParticipant,
+    updateParticipantSeed
   } = useTournament();
 
-  const [viewMode, setViewMode] = useState<ViewMode>('bracket');
+  const tournament = tournaments.find(t => t.id === id);
+
+  // Déterminer le mode de vue par défaut selon le format
+  const getDefaultViewMode = (): ViewMode => {
+    if (!tournament) return 'bracket';
+    if (tournament.format === 'groups' || tournament.format === 'championship' || tournament.format === 'swiss') {
+      return 'standings';
+    }
+    return 'bracket';
+  };
+
+  const [viewMode, setViewMode] = useState<ViewMode>(getDefaultViewMode());
   const [selectedMatch, setSelectedMatch] = useState<Match | null>(null);
   const [showWinnerSelection, setShowWinnerSelection] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<Participant | null>(null);
 
-  const tournament = tournaments.find(t => t.id === id);
-
   useEffect(() => {
-    if (tournament?.format === 'groups' || tournament?.format === 'championship') {
-      setViewMode('groups');
+    if (tournament) {
+      if (tournament.format === 'groups' || tournament.format === 'championship' || tournament.format === 'swiss') {
+        setViewMode('standings');
+      }
     }
   }, [tournament?.format]);
 
@@ -78,16 +91,20 @@ export function TournamentDetailPage() {
     );
   }
 
-  const handleAddParticipant = (name: string) => {
-    addParticipant(tournament.id, { name });
+  const handleAddParticipant = async (name: string) => {
+    await addParticipant(tournament.id, { name });
   };
 
-  const handleRemoveParticipant = (participantId: string) => {
-    removeParticipant(tournament.id, participantId);
+  const handleRemoveParticipant = async (participantId: string) => {
+    await removeParticipant(tournament.id, participantId);
   };
 
-  const handleGenerateBracket = () => {
-    generateBracket(tournament.id);
+  const handleGenerateBracket = async () => {
+    await generateBracket(tournament.id);
+  };
+
+  const handleGenerateSwissNextRound = async () => {
+    await generateSwissNextRound(tournament.id);
   };
 
   const handleStartTournament = () => {
@@ -98,13 +115,21 @@ export function TournamentDetailPage() {
     setSelectedMatch(match);
   };
 
-  const handleSubmitResult = (winnerId: string | undefined, score1: number, score2: number) => {
+  const handleSubmitResult = (result: {
+    winnerId: string | undefined;
+    score1: number;
+    score2: number;
+    games: import('@/types').Game[];
+    isPartial?: boolean;
+  }) => {
     if (selectedMatch) {
       submitMatchResult({
         matchId: selectedMatch.id,
-        winnerId,
-        participant1Score: score1,
-        participant2Score: score2
+        winnerId: result.winnerId,
+        participant1Score: result.score1,
+        participant2Score: result.score2,
+        games: result.games,
+        isPartial: result.isPartial
       });
       setSelectedMatch(null);
     }
@@ -119,18 +144,71 @@ export function TournamentDetailPage() {
 
   const canGenerateBracket = tournament.status === 'draft' && tournament.participants.length >= 2;
   const canStart = tournament.status === 'registration' && tournament.matches.length > 0;
-  // Ajout de joueurs uniquement en mode brouillon (avant génération du bracket)
   const canAddParticipants = tournament.status === 'draft';
   const canRemoveParticipants = tournament.status === 'draft';
+  
+  // Système suisse : vérifier si on peut générer la ronde suivante
+  const currentSwissRound = tournament.format === 'swiss' 
+    ? Math.max(...tournament.matches.map(m => m.round), 0)
+    : 0;
+  const totalSwissRounds = tournament.config.swissRounds || 
+    Math.ceil(Math.log2(tournament.participants.length));
+  const currentRoundCompleted = tournament.format === 'swiss' && currentSwissRound > 0
+    ? tournament.matches
+        .filter(m => m.round === currentSwissRound)
+        .every(m => m.status === 'completed')
+    : false;
+  const canGenerateSwissNextRound = tournament.format === 'swiss' 
+    && (tournament.status === 'in_progress' || tournament.status === 'registration')
+    && currentRoundCompleted
+    && currentSwissRound < totalSwissRounds;
+
+  // Calculer le Best-of applicable pour un match donné
+  const getBestOfForMatch = (match: Match): number => {
+    const config = tournament.config;
+    const defaultBo = config.bestOf || 1;
+    
+    // Pour élimination simple/double : vérifier si c'est la finale
+    if (tournament.format === 'single_elimination' || tournament.format === 'double_elimination') {
+      const maxRound = Math.max(...tournament.matches.map(m => m.round));
+      if (match.round === maxRound) {
+        return config.bestOfFinal || defaultBo;
+      }
+      return defaultBo;
+    }
+    
+    // Pour les groupes : différencier groupes, playoffs et finale
+    if (tournament.format === 'groups') {
+      if (match.groupId) {
+        return config.bestOfGroups || defaultBo;
+      }
+      const playoffsMatches = tournament.matches.filter(m => !m.groupId);
+      if (playoffsMatches.length > 0) {
+        const maxPlayoffRound = Math.max(...playoffsMatches.map(m => m.round));
+        if (match.round === maxPlayoffRound) {
+          return config.bestOfPlayoffsFinal || config.bestOfPlayoffs || defaultBo;
+        }
+        return config.bestOfPlayoffs || defaultBo;
+      }
+    }
+    
+    return defaultBo;
+  };
 
   const winner = tournament.winnerId 
     ? tournament.participants.find(p => p.id === tournament.winnerId)
     : null;
 
-  // Vérifier si le tournoi est terminé mais sans vainqueur (égalité)
   const allMatchesCompleted = tournament.matches.length > 0 && 
     tournament.matches.every(m => m.status === 'completed');
-  const needsWinnerSelection = allMatchesCompleted && !tournament.winnerId;
+  
+  // Pour Swiss, on utilise swissCompleted au lieu de needsWinnerSelection
+  const needsWinnerSelection = allMatchesCompleted && !tournament.winnerId && tournament.format !== 'swiss';
+
+  // Pour Swiss : vérifier si toutes les rondes sont terminées
+  const swissCompleted = tournament.format === 'swiss' 
+    && currentSwissRound >= totalSwissRounds 
+    && currentRoundCompleted;
 
   return (
     <div className="space-y-8 animate-fade-in">
@@ -150,19 +228,78 @@ export function TournamentDetailPage() {
             {tournament.description && (
               <p className="text-muted-foreground max-w-xl">{tournament.description}</p>
             )}
-            <div className="flex items-center gap-4 mt-2 text-sm text-muted-foreground">
+            {/* Format du tournoi */}
+            <div className="flex flex-wrap items-center gap-2 mt-2">
+              <Badge variant="outline" className="text-xs font-medium">
+                {tournament.format === 'single_elimination' && 'Élimination simple'}
+                {tournament.format === 'double_elimination' && 'Double élimination'}
+                {tournament.format === 'groups' && 'Phases de groupes'}
+                {tournament.format === 'championship' && 'Championnat'}
+                {tournament.format === 'swiss' && 'Système suisse'}
+              </Badge>
+              {(tournament.config.bestOf || 1) > 1 && (
+                <Badge variant="outline" className="text-xs font-medium">
+                  BO{tournament.config.bestOf}
+                  {tournament.config.bestOfFinal && tournament.config.bestOfFinal !== tournament.config.bestOf && 
+                    ` (Finale: BO${tournament.config.bestOfFinal})`}
+                </Badge>
+              )}
+              {tournament.format === 'swiss' && (
+                <Badge variant="outline" className="text-xs font-medium">
+                  Ronde {currentSwissRound}/{totalSwissRounds}
+                </Badge>
+              )}
+              {tournament.config.seeding && tournament.config.seeding !== 'random' && tournament.format !== 'swiss' && (
+                <Badge variant="outline" className="text-xs font-medium">
+                  Seeding {tournament.config.seeding === 'manual' ? 'manuel' : 'classement'}
+                </Badge>
+              )}
+            </div>
+            {/* Infos supplémentaires */}
+            <div className="flex flex-wrap items-center gap-4 mt-2 text-sm text-muted-foreground">
               {tournament.game && <span>{tournament.game}</span>}
               {tournament.category && <span>• {tournament.category}</span>}
-              <span>• {tournament.participants.length} participants</span>
+              <span>• {tournament.participants.length} participant{tournament.participants.length !== 1 ? 's' : ''}</span>
+              {tournament.scheduledStartDate && (
+                <span>• Début : {new Date(tournament.scheduledStartDate).toLocaleDateString('fr-FR', { 
+                  day: 'numeric', 
+                  month: 'short',
+                  hour: '2-digit',
+                  minute: '2-digit'
+                })}</span>
+              )}
+              {tournament.registrationEndDate && tournament.status === 'draft' && (
+                <span>• Inscriptions jusqu'au {new Date(tournament.registrationEndDate).toLocaleDateString('fr-FR', { 
+                  day: 'numeric', 
+                  month: 'short',
+                  hour: '2-digit'
+                })}</span>
+              )}
             </div>
           </div>
+          {/* Image du tournoi */}
+          {tournament.imageUrl && (
+            <div className="hidden sm:block">
+              <img 
+                src={tournament.imageUrl} 
+                alt={tournament.name}
+                className="w-24 h-24 object-cover rounded-lg border"
+              />
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-2 ml-12 sm:ml-0">
           {canGenerateBracket && (
             <Button onClick={handleGenerateBracket}>
               <LayoutGrid className="h-4 w-4 mr-2" />
-              Générer le bracket
+              {tournament.format === 'swiss' ? 'Générer ronde 1' : 'Générer le bracket'}
+            </Button>
+          )}
+          {canGenerateSwissNextRound && (
+            <Button onClick={handleGenerateSwissNextRound} variant="secondary">
+              <Play className="h-4 w-4 mr-2" />
+              Générer ronde {currentSwissRound + 1}/{totalSwissRounds}
             </Button>
           )}
           {canStart && (
@@ -193,7 +330,7 @@ export function TournamentDetailPage() {
       )}
 
       {/* Needs winner selection banner */}
-      {needsWinnerSelection && (
+      {(needsWinnerSelection || swissCompleted) && !winner && (
         <Card className="border-warning bg-gradient-to-r from-warning/10 to-warning/5">
           <CardContent className="flex items-center justify-between gap-4 py-6">
             <div className="flex items-center gap-4">
@@ -201,7 +338,9 @@ export function TournamentDetailPage() {
                 <Crown className="h-8 w-8" />
               </div>
               <div>
-                <p className="text-sm text-warning font-medium">Égalité détectée</p>
+                <p className="text-sm text-warning font-medium">
+                  {tournament.format === 'swiss' ? 'Tournoi terminé' : 'Égalité détectée'}
+                </p>
                 <h2 className="font-display text-lg font-semibold">Désignez le vainqueur du tournoi</h2>
               </div>
             </div>
@@ -219,7 +358,8 @@ export function TournamentDetailPage() {
           {/* View mode selector */}
           {tournament.matches.length > 0 && (
             <div className="flex items-center gap-2 p-1 bg-muted rounded-lg w-fit">
-              {tournament.format !== 'championship' && tournament.format !== 'groups' && (
+              {/* Bracket uniquement pour élimination simple/double */}
+              {(tournament.format === 'single_elimination' || tournament.format === 'double_elimination') && (
                 <Button
                   variant={viewMode === 'bracket' ? 'default' : 'ghost'}
                   size="sm"
@@ -230,11 +370,12 @@ export function TournamentDetailPage() {
                   Bracket
                 </Button>
               )}
-              {(tournament.format === 'groups' || tournament.format === 'championship') && (
+              {/* Classement pour groupes, championnat et swiss */}
+              {(tournament.format === 'groups' || tournament.format === 'championship' || tournament.format === 'swiss') && (
                 <Button
-                  variant={viewMode === 'groups' ? 'default' : 'ghost'}
+                  variant={viewMode === 'standings' ? 'default' : 'ghost'}
                   size="sm"
-                  onClick={() => setViewMode('groups')}
+                  onClick={() => setViewMode('standings')}
                   className="gap-2"
                 >
                   <Users className="h-4 w-4" />
@@ -253,8 +394,8 @@ export function TournamentDetailPage() {
             </div>
           )}
 
-          {/* Bracket view */}
-          {viewMode === 'bracket' && tournament.format !== 'championship' && (
+          {/* Bracket view - uniquement pour élimination */}
+          {viewMode === 'bracket' && (tournament.format === 'single_elimination' || tournament.format === 'double_elimination') && (
             <Card>
               <CardHeader>
                 <CardTitle>Bracket</CardTitle>
@@ -270,15 +411,19 @@ export function TournamentDetailPage() {
             </Card>
           )}
 
-          {/* Groups/Standings view */}
-          {viewMode === 'groups' && (tournament.format === 'groups' || tournament.format === 'championship') && (
+          {/* Standings view - pour groupes, championnat et swiss */}
+          {viewMode === 'standings' && (tournament.format === 'groups' || tournament.format === 'championship' || tournament.format === 'swiss') && (
             <div className="space-y-6">
               {tournament.groups?.map(group => (
                 <GroupStandingsTable
                   key={group.id}
                   group={group}
                   participants={tournament.participants}
-                  matches={tournament.matches.filter(m => m.groupId === group.id || tournament.format === 'championship')}
+                  matches={tournament.matches.filter(m => 
+                    m.groupId === group.id || 
+                    tournament.format === 'championship' || 
+                    tournament.format === 'swiss'
+                  )}
                   penalties={tournament.penalties}
                   participantStatuses={tournament.participantStatuses}
                   qualifiersCount={tournament.format === 'groups' ? tournament.config.qualifiersPerGroup : undefined}
@@ -293,7 +438,12 @@ export function TournamentDetailPage() {
           {viewMode === 'list' && (
             <Card>
               <CardHeader>
-                <CardTitle>Matchs</CardTitle>
+                <CardTitle>
+                  {tournament.format === 'swiss' 
+                    ? `Matchs - Ronde ${currentSwissRound}/${totalSwissRounds}`
+                    : 'Matchs'
+                  }
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 {tournament.format === 'groups' ? (
@@ -306,6 +456,20 @@ export function TournamentDetailPage() {
                         participantStatuses={tournament.participantStatuses}
                         onMatchClick={handleMatchClick}
                         groupName={group.name}
+                      />
+                    ))}
+                  </div>
+                ) : tournament.format === 'swiss' ? (
+                  <div className="space-y-6">
+                    {/* Afficher les matchs par ronde */}
+                    {Array.from({ length: currentSwissRound }, (_, i) => i + 1).map(round => (
+                      <MatchList
+                        key={round}
+                        matches={tournament.matches.filter(m => m.round === round)}
+                        participants={tournament.participants}
+                        participantStatuses={tournament.participantStatuses}
+                        onMatchClick={handleMatchClick}
+                        groupName={`Ronde ${round}`}
                       />
                     ))}
                   </div>
@@ -326,13 +490,15 @@ export function TournamentDetailPage() {
             <Card className="border-dashed">
               <CardContent className="flex flex-col items-center justify-center py-12 text-center">
                 <LayoutGrid className="h-12 w-12 text-muted-foreground mb-4" />
-                <h3 className="font-semibold text-lg mb-2">Aucun bracket généré</h3>
+                <h3 className="font-semibold text-lg mb-2">
+                  {tournament.format === 'swiss' ? 'Aucune ronde générée' : 'Aucun bracket généré'}
+                </h3>
                 <p className="text-muted-foreground mb-4 max-w-sm">
-                  Ajoutez au moins 2 participants puis générez le bracket pour commencer le tournoi
+                  Ajoutez au moins 2 participants puis générez {tournament.format === 'swiss' ? 'la première ronde' : 'le bracket'} pour commencer le tournoi
                 </p>
                 {canGenerateBracket && (
                   <Button onClick={handleGenerateBracket}>
-                    Générer le bracket
+                    {tournament.format === 'swiss' ? 'Générer la ronde 1' : 'Générer le bracket'}
                   </Button>
                 )}
               </CardContent>
@@ -355,8 +521,11 @@ export function TournamentDetailPage() {
                 participants={tournament.participants}
                 onAdd={handleAddParticipant}
                 onRemove={handleRemoveParticipant}
+                onUpdateSeed={(participantId, newSeed) => updateParticipantSeed(tournament.id, participantId, newSeed)}
                 canAdd={canAddParticipants}
                 canRemove={canRemoveParticipants}
+                canEditSeeds={tournament.status === 'draft' && tournament.format !== 'swiss'}
+                seedingMode={tournament.format === 'swiss' ? 'random' : (tournament.config.seeding || 'random')}
                 winnerId={tournament.winnerId}
                 penalties={tournament.penalties}
                 participantStatuses={tournament.participantStatuses}
@@ -385,6 +554,12 @@ export function TournamentDetailPage() {
                     {Math.round((tournament.matches.filter(m => m.status === 'completed').length / tournament.matches.length) * 100)}%
                   </span>
                 </div>
+                {tournament.format === 'swiss' && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Ronde</span>
+                    <span className="font-semibold">{currentSwissRound} / {totalSwissRounds}</span>
+                  </div>
+                )}
                 {tournament.startedAt && (
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Démarré le</span>
@@ -397,16 +572,10 @@ export function TournamentDetailPage() {
             </Card>
           )}
 
-          {/* Timer integration (for future use) */}
-          <Card className="border-dashed opacity-60">
-            <CardContent className="flex items-center gap-3 py-4">
-              <Timer className="h-5 w-5 text-muted-foreground" />
-              <div>
-                <p className="font-medium text-sm">Intégration Timer</p>
-                <p className="text-xs text-muted-foreground">Bientôt disponible</p>
-              </div>
-            </CardContent>
-          </Card>
+          {/* Historique des événements */}
+          {tournament.events && tournament.events.length > 0 && (
+            <TournamentHistory events={tournament.events} />
+          )}
 
           {/* Cashprize */}
           {tournament.config.cashprize && (
@@ -510,6 +679,7 @@ export function TournamentDetailPage() {
           onSubmit={handleSubmitResult}
           onClose={() => setSelectedMatch(null)}
           highScoreWins={tournament.config.highScoreWins !== false}
+          bestOf={getBestOfForMatch(selectedMatch)}
         />
       )}
 
@@ -528,13 +698,11 @@ export function TournamentDetailPage() {
 
       {/* Participant management modal */}
       {selectedParticipant && (() => {
-        // Calculer si le joueur peut avoir un repêchage
         const isEliminationFormat = tournament.format === 'single_elimination' || tournament.format === 'double_elimination';
         let canRepechage = false;
         let lastDefeatedName: string | undefined;
         
         if (isEliminationFormat) {
-          // Chercher le dernier match gagné par ce joueur
           const wonMatches = tournament.matches
             .filter(m => 
               m.status === 'completed' && 

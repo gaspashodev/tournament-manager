@@ -7,7 +7,8 @@ import {
   Swords,
   GitBranch,
   Grid3X3,
-  Medal
+  Medal,
+  Shuffle
 } from 'lucide-react';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -22,14 +23,16 @@ const formatIcons: Record<TournamentFormat, typeof Trophy> = {
   single_elimination: Swords,
   double_elimination: GitBranch,
   groups: Grid3X3,
-  championship: Medal
+  championship: Medal,
+  swiss: Shuffle
 };
 
 const formatLabels: Record<TournamentFormat, string> = {
   single_elimination: 'Élimination directe',
   double_elimination: 'Double élimination',
   groups: 'Phases de groupes',
-  championship: 'Championnat'
+  championship: 'Championnat',
+  swiss: 'Système suisse'
 };
 
 const statusLabels: Record<TournamentStatus, string> = {

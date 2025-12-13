@@ -1,5 +1,7 @@
-import React, { createContext, useContext, useReducer, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
+import { tournamentService } from '@/lib/tournament-service';
+import { supabase } from '@/lib/supabase';
 import type { 
   Tournament, 
   CreateTournamentInput, 
@@ -12,6 +14,27 @@ import type {
   Penalty,
   ParticipantStatus
 } from '@/types';
+
+// Importer les utils depuis les modules séparés
+import { createEvent } from '@/utils/tournament/event-utils';
+import { calculateWinner } from '@/utils/tournament/match-utils';
+import { 
+  determineTournamentWinner,
+  calculateSwissStandings
+} from '@/utils/tournament/standings-utils';
+import {
+  generateSingleEliminationMatches,
+  generateGroupStageMatches,
+  generateChampionshipMatches,
+  generateSwissInitialRound,
+  generateNextSwissRound
+} from '@/utils/tournament/bracket-generators';
+
+// Ré-exporter getTiedParticipants pour les composants qui l'importent d'ici
+export { getTiedParticipants } from '@/utils/tournament/standings-utils';
+
+// Clé localStorage pour le fallback
+const STORAGE_KEY = 'tournament-manager-data';
 
 // State
 interface TournamentState {
@@ -77,360 +100,135 @@ const initialState: TournamentState = {
 
 // Context
 interface TournamentContextType extends TournamentState {
-  createTournament: (input: CreateTournamentInput) => Tournament;
+  createTournament: (input: CreateTournamentInput) => Promise<Tournament>;
   updateTournament: (tournament: Tournament) => void;
   deleteTournament: (id: string) => void;
   setCurrentTournament: (tournament: Tournament | null) => void;
-  addParticipant: (tournamentId: string, input: AddParticipantInput) => void;
-  removeParticipant: (tournamentId: string, participantId: string) => void;
-  generateBracket: (tournamentId: string) => void;
+  addParticipant: (tournamentId: string, input: AddParticipantInput) => Promise<void>;
+  removeParticipant: (tournamentId: string, participantId: string) => Promise<void>;
+  updateParticipantSeed: (tournamentId: string, participantId: string, newSeed: number) => void;
+  generateBracket: (tournamentId: string) => Promise<void>;
+  generateSwissNextRound: (tournamentId: string) => Promise<void>;
   submitMatchResult: (input: MatchResultInput) => void;
   startTournament: (tournamentId: string) => void;
   setTournamentWinner: (tournamentId: string, winnerId: string) => void;
   // Nouvelles fonctions
-  addPenalty: (tournamentId: string, participantId: string, points: number, reason: string) => void;
-  removePenalty: (tournamentId: string, penaltyId: string) => void;
+  addPenalty: (tournamentId: string, participantId: string, points: number, reason: string) => Promise<void>;
+  removePenalty: (tournamentId: string, penaltyId: string) => Promise<void>;
   eliminateParticipant: (tournamentId: string, participantId: string, reason: string, useRepechage?: boolean) => void;
   reinstateParticipant: (tournamentId: string, participantId: string) => void;
+  // Sync
+  loadTournaments: () => Promise<void>;
+  syncEnabled: boolean;
 }
 
 const TournamentContext = createContext<TournamentContextType | undefined>(undefined);
 
-// Helper: Créer les standings initiaux pour un groupe ou championnat
-function createInitialStandings(participantIds: string[]): GroupStanding[] {
-  return participantIds.map(id => ({
-    participantId: id,
-    played: 0,
-    won: 0,
-    lost: 0,
-    drawn: 0,
-    pointsFor: 0,
-    pointsAgainst: 0,
-    points: 0
-  }));
-}
-
-// Helper: Calculer le vainqueur d'un match basé sur les scores
-function calculateWinner(
-  participant1Id: string | undefined,
-  participant2Id: string | undefined,
-  score1: number,
-  score2: number,
-  highScoreWins: boolean = true
-): string | undefined {
-  if (!participant1Id || !participant2Id) return undefined;
-  
-  if (score1 === score2) return undefined; // Égalité, pas de vainqueur automatique
-  
-  if (highScoreWins) {
-    return score1 > score2 ? participant1Id : participant2Id;
-  } else {
-    return score1 < score2 ? participant1Id : participant2Id;
-  }
-}
-
-// Helper: Déterminer le vainqueur d'un tournoi basé sur les standings
-// Helper pour trouver le vainqueur de la confrontation directe
-function getHeadToHeadWinner(
-  participant1Id: string,
-  participant2Id: string,
-  matches: Match[]
-): string | undefined {
-  // Trouver le(s) match(s) entre ces deux participants
-  const headToHeadMatches = matches.filter(m => 
-    m.status === 'completed' &&
-    ((m.participant1Id === participant1Id && m.participant2Id === participant2Id) ||
-     (m.participant1Id === participant2Id && m.participant2Id === participant1Id))
-  );
-  
-  if (headToHeadMatches.length === 0) return undefined;
-  
-  // Compter les victoires
-  let wins1 = 0;
-  let wins2 = 0;
-  
-  for (const match of headToHeadMatches) {
-    if (match.winnerId === participant1Id) wins1++;
-    else if (match.winnerId === participant2Id) wins2++;
-  }
-  
-  if (wins1 > wins2) return participant1Id;
-  if (wins2 > wins1) return participant2Id;
-  return undefined; // Égalité dans les confrontations directes
-}
-
-// Helper pour obtenir les joueurs à égalité parfaite en tête du classement
-export function getTiedParticipants(
-  standings: GroupStanding[]
-): GroupStanding[] {
-  if (standings.length < 2) return standings;
-  
-  const sorted = [...standings].sort((a, b) => {
-    if (b.points !== a.points) return b.points - a.points;
-    const diffA = a.pointsFor - a.pointsAgainst;
-    const diffB = b.pointsFor - b.pointsAgainst;
-    if (diffB !== diffA) return diffB - diffA;
-    return b.pointsFor - a.pointsFor;
-  });
-  
-  const first = sorted[0];
-  const firstDiff = first.pointsFor - first.pointsAgainst;
-  
-  // Trouver tous les joueurs avec les mêmes stats que le premier
-  return sorted.filter(s => {
-    const diff = s.pointsFor - s.pointsAgainst;
-    return s.points === first.points && diff === firstDiff && s.pointsFor === first.pointsFor;
-  });
-}
-
-function determineTournamentWinner(
-  format: string,
-  matches: Match[],
-  groups?: Group[],
-  standings?: GroupStanding[],
-  useHeadToHead?: boolean
-): string | undefined {
-  if (format === 'single_elimination' || format === 'double_elimination') {
-    // Le vainqueur est celui du dernier match (finale)
-    const maxRound = Math.max(...matches.map(m => m.round));
-    const finalMatch = matches.find(m => m.round === maxRound);
-    return finalMatch?.winnerId;
-  }
-  
-  if (format === 'groups') {
-    // Pour les groupes, on prend le meilleur des premiers de chaque groupe
-    // (simplifié - normalement il y aurait des playoffs)
-    if (!groups) return undefined;
-    
-    let bestWinner: { id: string; points: number; diff: number } | undefined;
-    
-    for (const group of groups) {
-      if (group.standings && group.standings.length > 0) {
-        const sorted = [...group.standings].sort((a, b) => {
-          if (b.points !== a.points) return b.points - a.points;
-          const diffA = a.pointsFor - a.pointsAgainst;
-          const diffB = b.pointsFor - b.pointsAgainst;
-          return diffB - diffA;
-        });
-        
-        const groupWinner = sorted[0];
-        const winnerDiff = groupWinner.pointsFor - groupWinner.pointsAgainst;
-        
-        if (!bestWinner || groupWinner.points > bestWinner.points || 
-            (groupWinner.points === bestWinner.points && winnerDiff > bestWinner.diff)) {
-          bestWinner = { id: groupWinner.participantId, points: groupWinner.points, diff: winnerDiff };
-        }
-      }
-    }
-    
-    return bestWinner?.id;
-  }
-  
-  if (format === 'championship') {
-    // Le vainqueur est celui avec le plus de points dans le classement
-    if (!standings || standings.length === 0) return undefined;
-    
-    const sorted = [...standings].sort((a, b) => {
-      if (b.points !== a.points) return b.points - a.points;
-      const diffA = a.pointsFor - a.pointsAgainst;
-      const diffB = b.pointsFor - b.pointsAgainst;
-      if (diffB !== diffA) return diffB - diffA;
-      return b.pointsFor - a.pointsFor;
-    });
-    
-    // Trouver tous les joueurs à égalité parfaite en tête
-    const tiedParticipants = getTiedParticipants(standings);
-    
-    if (tiedParticipants.length >= 2) {
-      // S'il y a égalité et que useHeadToHead est activé, regarder la confrontation directe
-      if (useHeadToHead && tiedParticipants.length === 2) {
-        const winner = getHeadToHeadWinner(
-          tiedParticipants[0].participantId,
-          tiedParticipants[1].participantId,
-          matches
-        );
-        if (winner) return winner;
-      }
-      
-      // Si plus de 2 joueurs à égalité ou pas de vainqueur en confrontation directe
-      // -> pas de vainqueur automatique
-      return undefined;
-    }
-    
-    return sorted[0].participantId;
-  }
-  
-  return undefined;
-}
-
-// Helper functions pour générer les brackets
-function generateSingleEliminationMatches(participants: Participant[]): Match[] {
-  const matches: Match[] = [];
-  const participantCount = participants.length;
-  
-  // Calculer le nombre de rounds nécessaires
-  const rounds = Math.ceil(Math.log2(participantCount));
-  const totalSlots = Math.pow(2, rounds);
-  
-  // Créer les seedings (mélange si pas de seed manuel)
-  const seededParticipants = [...participants].sort((a, b) => {
-    if (a.seed && b.seed) return a.seed - b.seed;
-    return Math.random() - 0.5;
-  });
-  
-  // Générer les matchs du premier tour
-  let matchPosition = 0;
-  const firstRoundMatchCount = totalSlots / 2;
-  
-  for (let i = 0; i < firstRoundMatchCount; i++) {
-    const p1Index = i;
-    const p2Index = totalSlots - 1 - i;
-    
-    const participant1 = seededParticipants[p1Index];
-    const participant2 = p2Index < participantCount ? seededParticipants[p2Index] : undefined;
-    
-    // Si pas d'adversaire (bye), le participant est automatiquement vainqueur
-    const isBye = !participant2;
-    
-    matches.push({
-      id: uuidv4(),
-      tournamentId: '',
-      round: 1,
-      position: matchPosition++,
-      participant1Id: participant1?.id,
-      participant2Id: participant2?.id,
-      status: isBye ? 'completed' : 'pending',
-      winnerId: isBye ? participant1?.id : undefined
-    });
-  }
-  
-  // Générer les matchs des rounds suivants
-  for (let round = 2; round <= rounds; round++) {
-    const matchCount = Math.pow(2, rounds - round);
-    for (let i = 0; i < matchCount; i++) {
-      matches.push({
-        id: uuidv4(),
-        tournamentId: '',
-        round,
-        position: i,
-        status: 'pending'
-      });
-    }
-  }
-  
-  // Propager les gagnants des byes au tour suivant
-  const firstRoundMatches = matches.filter(m => m.round === 1);
-  for (const match of firstRoundMatches) {
-    if (match.status === 'completed' && match.winnerId) {
-      // Trouver le match du tour suivant
-      const nextRoundMatch = matches.find(m => 
-        m.round === 2 && 
-        Math.floor(match.position / 2) === m.position
-      );
-      if (nextRoundMatch) {
-        const isFirstSlot = match.position % 2 === 0;
-        if (isFirstSlot) {
-          nextRoundMatch.participant1Id = match.winnerId;
-        } else {
-          nextRoundMatch.participant2Id = match.winnerId;
-        }
-      }
-    }
-  }
-  
-  return matches;
-}
-
-function generateGroupStageMatches(participants: Participant[], groupCount: number): { groups: Group[], matches: Match[] } {
-  const groups: Group[] = [];
-  const matches: Match[] = [];
-  
-  // Répartir les participants dans les groupes
-  const shuffled = [...participants].sort(() => Math.random() - 0.5);
-  const participantsPerGroup = Math.ceil(shuffled.length / groupCount);
-  
-  for (let g = 0; g < groupCount; g++) {
-    const groupParticipants = shuffled.slice(
-      g * participantsPerGroup, 
-      (g + 1) * participantsPerGroup
-    );
-    
-    const group: Group = {
-      id: uuidv4(),
-      name: `Groupe ${String.fromCharCode(65 + g)}`,
-      tournamentId: '',
-      participantIds: groupParticipants.map(p => p.id),
-      standings: createInitialStandings(groupParticipants.map(p => p.id))
-    };
-    
-    groups.push(group);
-    
-    // Générer les matchs round-robin pour ce groupe
-    let matchPosition = 0;
-    for (let i = 0; i < groupParticipants.length; i++) {
-      for (let j = i + 1; j < groupParticipants.length; j++) {
-        matches.push({
-          id: uuidv4(),
-          tournamentId: '',
-          round: 1,
-          position: matchPosition++,
-          participant1Id: groupParticipants[i].id,
-          participant2Id: groupParticipants[j].id,
-          status: 'pending',
-          groupId: group.id
-        });
-      }
-    }
-  }
-  
-  return { groups, matches };
-}
-
-function generateChampionshipMatches(participants: Participant[], homeAndAway: boolean): { matches: Match[], standings: GroupStanding[] } {
-  const matches: Match[] = [];
-  let round = 1;
-  
-  // Round-robin: chaque participant joue contre tous les autres
-  for (let i = 0; i < participants.length; i++) {
-    for (let j = i + 1; j < participants.length; j++) {
-      matches.push({
-        id: uuidv4(),
-        tournamentId: '',
-        round,
-        position: matches.length,
-        participant1Id: participants[i].id,
-        participant2Id: participants[j].id,
-        status: 'pending'
-      });
-      
-      // Match retour si home and away
-      if (homeAndAway) {
-        matches.push({
-          id: uuidv4(),
-          tournamentId: '',
-          round: round + 1,
-          position: matches.length,
-          participant1Id: participants[j].id,
-          participant2Id: participants[i].id,
-          status: 'pending'
-        });
-      }
-    }
-  }
-  
-  // Créer les standings pour le championnat
-  const standings = createInitialStandings(participants.map(p => p.id));
-  
-  return { matches, standings };
-}
-
 // Provider
 export function TournamentProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(tournamentReducer, initialState);
+  const syncEnabled = tournamentService.isConfigured();
+  const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const initialLoadDone = useRef(false);
 
-  const createTournament = useCallback((input: CreateTournamentInput): Tournament => {
+  // Charger les tournois au démarrage
+  const loadTournaments = useCallback(async () => {
+    dispatch({ type: 'SET_LOADING', payload: true });
+    
+    try {
+      if (syncEnabled) {
+        // Charger depuis Supabase
+        const tournaments = await tournamentService.getAll();
+        
+        // Pour chaque tournoi, charger les détails complets
+        const fullTournaments = await Promise.all(
+          tournaments.map((t: Tournament) => tournamentService.getById(t.id))
+        );
+        
+        dispatch({ 
+          type: 'SET_TOURNAMENTS', 
+          payload: fullTournaments.filter((t: Tournament | null): t is Tournament => t !== null) 
+        });
+        console.log('Tournaments loaded from Supabase');
+      } else {
+        // Charger depuis localStorage
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          const data = JSON.parse(stored);
+          // Reconvertir les dates
+          const tournaments = data.map((t: any) => ({
+            ...t,
+            createdAt: new Date(t.createdAt),
+            updatedAt: new Date(t.updatedAt),
+            startedAt: t.startedAt ? new Date(t.startedAt) : undefined,
+            completedAt: t.completedAt ? new Date(t.completedAt) : undefined,
+            penalties: t.penalties?.map((p: any) => ({
+              ...p,
+              createdAt: new Date(p.createdAt)
+            })) || [],
+            participantStatuses: t.participantStatuses?.map((s: any) => ({
+              ...s,
+              eliminatedAt: s.eliminatedAt ? new Date(s.eliminatedAt) : undefined
+            })) || []
+          }));
+          dispatch({ type: 'SET_TOURNAMENTS', payload: tournaments });
+          console.log('Tournaments loaded from localStorage');
+        }
+      }
+    } catch (error) {
+      console.error('Error loading tournaments:', error);
+      dispatch({ type: 'SET_ERROR', payload: 'Erreur lors du chargement des tournois' });
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
+    }
+  }, [syncEnabled]);
+
+  // Charger au démarrage
+  useEffect(() => {
+    if (!initialLoadDone.current) {
+      initialLoadDone.current = true;
+      loadTournaments();
+    }
+  }, [loadTournaments]);
+
+  // Sauvegarder dans localStorage (toujours, comme backup)
+  useEffect(() => {
+    if (state.tournaments.length > 0 || initialLoadDone.current) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.tournaments));
+    }
+  }, [state.tournaments]);
+
+  // Fonction helper pour synchroniser avec Supabase (avec debounce)
+  const syncToSupabase = useCallback((tournament: Tournament) => {
+    if (!syncEnabled) return;
+
+    // Annuler le timeout précédent
+    if (syncTimeoutRef.current) {
+      clearTimeout(syncTimeoutRef.current);
+    }
+
+    // Synchroniser après un délai (debounce)
+    syncTimeoutRef.current = setTimeout(async () => {
+      try {
+        await tournamentService.syncTournament(tournament);
+        console.log('Tournament synced to Supabase:', tournament.id);
+      } catch (error) {
+        console.error('Error syncing tournament:', error);
+      }
+    }, 1000);
+  }, [syncEnabled]);
+
+  const createTournament = useCallback(async (input: CreateTournamentInput): Promise<Tournament> => {
+    const tournamentId = uuidv4();
+    
+    // Événement de création
+    const creationEvent = createEvent(
+      'tournament_created',
+      `Tournoi "${input.name}" créé`
+    );
+    
     const tournament: Tournament = {
-      id: uuidv4(),
+      id: tournamentId,
       name: input.name,
       description: input.description,
       format: input.format,
@@ -451,78 +249,202 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
       participants: [],
       matches: [],
       groups: [],
+      events: [creationEvent],
       createdAt: new Date(),
       updatedAt: new Date(),
       game: input.game,
-      category: input.category
+      category: input.category,
+      imageUrl: input.imageUrl,
+      // Nouvelles dates
+      scheduledStartDate: input.scheduledStartDate,
+      registrationEndDate: input.registrationEndDate,
+      registrationOpen: input.registrationOpen
     };
     
-    dispatch({ type: 'ADD_TOURNAMENT', payload: tournament });
-    return tournament;
-  }, []);
+    // Si Supabase est configuré, créer le tournoi là-bas
+    if (syncEnabled) {
+      try {
+        const created = await tournamentService.createFull(tournament);
+        dispatch({ type: 'ADD_TOURNAMENT', payload: created });
+        return created;
+      } catch (error) {
+        console.error('Error creating tournament in Supabase:', error);
+        // Fallback: créer localement
+        dispatch({ type: 'ADD_TOURNAMENT', payload: tournament });
+        return tournament;
+      }
+    } else {
+      dispatch({ type: 'ADD_TOURNAMENT', payload: tournament });
+      return tournament;
+    }
+  }, [syncEnabled]);
 
   const updateTournament = useCallback((tournament: Tournament) => {
     tournament.updatedAt = new Date();
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: tournament });
-  }, []);
+    syncToSupabase(tournament);
+  }, [syncToSupabase]);
 
-  const deleteTournament = useCallback((id: string) => {
+  const deleteTournament = useCallback(async (id: string) => {
+    // Récupérer le tournoi avant suppression pour avoir l'URL de l'image
+    const tournament = state.tournaments.find(t => t.id === id);
+    
     dispatch({ type: 'DELETE_TOURNAMENT', payload: id });
-  }, []);
+    
+    if (syncEnabled) {
+      try {
+        // Supprimer l'image du storage si elle existe
+        if (tournament?.imageUrl && tournament.imageUrl.includes('supabase')) {
+          await tournamentService.deleteTournamentImage(tournament.imageUrl);
+          console.log('Tournament image deleted from Storage');
+        }
+        
+        await tournamentService.delete(id);
+        console.log('Tournament deleted from Supabase:', id);
+      } catch (error) {
+        console.error('Error deleting tournament from Supabase:', error);
+      }
+    }
+  }, [syncEnabled, state.tournaments]);
 
   const setCurrentTournament = useCallback((tournament: Tournament | null) => {
     dispatch({ type: 'SET_CURRENT_TOURNAMENT', payload: tournament });
   }, []);
 
-  const addParticipant = useCallback((tournamentId: string, input: AddParticipantInput) => {
+  const addParticipant = useCallback(async (tournamentId: string, input: AddParticipantInput) => {
     const tournament = state.tournaments.find(t => t.id === tournamentId);
     if (!tournament) return;
 
+    let participantId = uuidv4();
+    
+    // Si Supabase est activé, créer le participant là-bas
+    if (syncEnabled) {
+      try {
+        const created = await tournamentService.addParticipant(tournamentId, {
+          name: input.name,
+          seed: input.seed || tournament.participants.length + 1
+        });
+        participantId = created.id;
+        console.log('Participant added to Supabase:', created);
+      } catch (err) {
+        console.error('Error adding participant to Supabase:', err);
+        // Continue avec l'ID local en cas d'erreur
+      }
+    }
+
+    // Assigner automatiquement le seed si non fourni
+    const autoSeed = input.seed || tournament.participants.length + 1;
+
     const participant: Participant = {
-      id: uuidv4(),
+      id: participantId,
       name: input.name,
-      seed: input.seed,
+      seed: autoSeed,
       metadata: input.metadata
     };
+
+    // Créer l'événement
+    const event = createEvent(
+      'participant_added',
+      `${input.name} a rejoint le tournoi`,
+      { participantId, participantName: input.name }
+    );
 
     const updated = {
       ...tournament,
       participants: [...tournament.participants, participant],
+      events: [...(tournament.events || []), event],
       updatedAt: new Date()
     };
 
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
-  }, [state.tournaments]);
+  }, [state.tournaments, syncEnabled]);
 
-  const removeParticipant = useCallback((tournamentId: string, participantId: string) => {
+  const removeParticipant = useCallback(async (tournamentId: string, participantId: string) => {
     const tournament = state.tournaments.find(t => t.id === tournamentId);
     if (!tournament) return;
+
+    // Trouver le participant pour l'événement
+    const participant = tournament.participants.find(p => p.id === participantId);
+
+    // Supprimer de Supabase si activé
+    if (syncEnabled) {
+      try {
+        await tournamentService.removeParticipant(participantId);
+        console.log('Participant removed from Supabase:', participantId);
+      } catch (err) {
+        console.error('Error removing participant from Supabase:', err);
+      }
+    }
+
+    // Créer l'événement
+    const event = createEvent(
+      'participant_removed',
+      `${participant?.name || 'Un participant'} a quitté le tournoi`,
+      { participantId, participantName: participant?.name }
+    );
 
     const updated = {
       ...tournament,
       participants: tournament.participants.filter(p => p.id !== participantId),
+      events: [...(tournament.events || []), event],
       updatedAt: new Date()
     };
 
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
-  }, [state.tournaments]);
+  }, [state.tournaments, syncEnabled]);
 
-  const generateBracket = useCallback((tournamentId: string) => {
+  const updateParticipantSeed = useCallback((tournamentId: string, participantId: string, newSeed: number) => {
+    const tournament = state.tournaments.find(t => t.id === tournamentId);
+    if (!tournament) return;
+
+    // Trouver le participant actuel et celui qui a le seed cible
+    const currentParticipant = tournament.participants.find(p => p.id === participantId);
+    if (!currentParticipant) return;
+    
+    const oldSeed = currentParticipant.seed;
+    
+    // Si le seed ne change pas, ne rien faire
+    if (oldSeed === newSeed) return;
+
+    // Mettre à jour les seeds de manière atomique (swap)
+    const updatedParticipants = tournament.participants.map(p => {
+      if (p.id === participantId) {
+        return { ...p, seed: newSeed };
+      }
+      // Si un autre participant a le nouveau seed, lui donner l'ancien
+      if (p.seed === newSeed && oldSeed !== undefined) {
+        return { ...p, seed: oldSeed };
+      }
+      return p;
+    });
+
+    const updated = {
+      ...tournament,
+      participants: updatedParticipants,
+      updatedAt: new Date()
+    };
+
+    dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
+    syncToSupabase(updated);
+  }, [state.tournaments, syncToSupabase]);
+
+  const generateBracket = useCallback(async (tournamentId: string) => {
     const tournament = state.tournaments.find(t => t.id === tournamentId);
     if (!tournament || tournament.participants.length < 2) return;
 
     let matches: Match[] = [];
     let groups: Group[] = [];
     let championshipStandings: GroupStanding[] | undefined;
+    const seedingType = tournament.config.seeding || 'random';
 
     switch (tournament.format) {
       case 'single_elimination':
-        matches = generateSingleEliminationMatches(tournament.participants);
+        matches = generateSingleEliminationMatches(tournament.participants, seedingType);
         break;
       case 'double_elimination':
         // Pour le moment, on génère comme une élimination simple
         // Une implémentation complète ajouterait le bracket des perdants
-        matches = generateSingleEliminationMatches(tournament.participants);
+        matches = generateSingleEliminationMatches(tournament.participants, seedingType);
         matches = matches.map(m => ({ ...m, bracket: 'winners' as const }));
         break;
       case 'groups': {
@@ -551,22 +473,244 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
         }];
         break;
       }
+      case 'swiss': {
+        const result = generateSwissInitialRound(
+          tournament.participants,
+          tournament.config
+        );
+        matches = result.matches;
+        // Pour le suisse, on crée un groupe virtuel pour stocker les standings
+        groups = [{
+          id: uuidv4(),
+          name: 'Classement Suisse',
+          tournamentId,
+          participantIds: tournament.participants.map(p => p.id),
+          standings: result.standings
+        }];
+        break;
+      }
     }
 
     // Assigner l'ID du tournoi à tous les matchs et groupes
     matches = matches.map(m => ({ ...m, tournamentId }));
     groups = groups.map(g => ({ ...g, tournamentId }));
 
+    // Si Supabase est activé, créer les groupes et matchs
+    if (syncEnabled && supabase) {
+      try {
+        // Créer les groupes si nécessaire
+        if (groups.length > 0) {
+          for (const group of groups) {
+            // Créer le groupe
+            const { error: groupError } = await supabase
+              .from('groups')
+              .insert({
+                id: group.id,
+                tournament_id: tournamentId,
+                name: group.name
+              } as any);
+            
+            if (groupError) {
+              console.error('Error creating group:', groupError);
+              continue;
+            }
+            
+            // Créer les associations groupe-participant
+            if (group.participantIds.length > 0) {
+              const { error: gpError } = await supabase
+                .from('group_participants')
+                .insert(
+                  group.participantIds.map(pId => ({
+                    group_id: group.id,
+                    participant_id: pId
+                  })) as any
+                );
+              
+              if (gpError) console.error('Error creating group_participants:', gpError);
+            }
+            
+            // Créer les standings
+            if (group.standings && group.standings.length > 0) {
+              const { error: standingsError } = await supabase
+                .from('group_standings')
+                .insert(
+                  group.standings.map(s => ({
+                    group_id: group.id,
+                    participant_id: s.participantId,
+                    played: s.played,
+                    won: s.won,
+                    drawn: s.drawn,
+                    lost: s.lost,
+                    points_for: s.pointsFor,
+                    points_against: s.pointsAgainst,
+                    points: s.points
+                  })) as any
+                );
+              
+              if (standingsError) console.error('Error creating standings:', standingsError);
+            }
+          }
+          console.log('Groups created in Supabase');
+        }
+        
+        // Créer les matchs
+        if (matches.length > 0) {
+          const { error: matchesError } = await supabase
+            .from('matches')
+            .insert(
+              matches.map(m => ({
+                id: m.id,
+                tournament_id: tournamentId,
+                group_id: m.groupId || null,
+                round: m.round,
+                position: m.position,
+                participant1_id: m.participant1Id || null,
+                participant2_id: m.participant2Id || null,
+                winner_id: m.winnerId || null,
+                loser_id: m.loserId || null,
+                score_participant1: m.score?.participant1Score ?? null,
+                score_participant2: m.score?.participant2Score ?? null,
+                status: m.status,
+                bracket: m.bracket || null
+              })) as any
+            );
+          
+          if (matchesError) {
+            console.error('Error creating matches:', matchesError);
+          } else {
+            console.log('Matches created in Supabase:', matches.length);
+          }
+        }
+      } catch (err) {
+        console.error('Error syncing bracket to Supabase:', err);
+      }
+    }
+
     const updated = {
       ...tournament,
       matches,
       groups,
-      status: 'registration' as const,
+      events: [...(tournament.events || []), createEvent(
+        'bracket_generated',
+        `Bracket généré avec ${matches.length} matchs`,
+        { }
+      )],
+      // Pour Swiss, démarrer directement car pas de phase d'inscription distincte
+      status: tournament.format === 'swiss' ? 'in_progress' as const : 'registration' as const,
+      startedAt: tournament.format === 'swiss' ? new Date() : undefined,
       updatedAt: new Date()
     };
 
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
-  }, [state.tournaments]);
+  }, [state.tournaments, syncEnabled]);
+
+  // Générer la ronde suivante pour un tournoi suisse
+  const generateSwissNextRound = useCallback(async (tournamentId: string) => {
+    const tournament = state.tournaments.find(t => t.id === tournamentId);
+    if (!tournament || tournament.format !== 'swiss') return;
+
+    // Vérifier que tous les matchs de la ronde actuelle sont terminés
+    const currentRound = Math.max(...tournament.matches.map(m => m.round), 0);
+    const currentRoundMatches = tournament.matches.filter(m => m.round === currentRound);
+    const allCompleted = currentRoundMatches.every(m => m.status === 'completed');
+    
+    if (!allCompleted && currentRound > 0) {
+      console.warn('Cannot generate next round: current round not completed');
+      return;
+    }
+
+    // Calculer le nombre de rondes prévu
+    const totalRounds = tournament.config.swissRounds || 
+      Math.ceil(Math.log2(tournament.participants.length));
+    
+    const nextRound = currentRound + 1;
+    
+    // Vérifier si le tournoi est terminé
+    if (nextRound > totalRounds) {
+      console.log('Swiss tournament completed');
+      return;
+    }
+
+    // Générer les matchs de la prochaine ronde
+    const avoidRematches = tournament.config.swissAvoidRematches !== false;
+    const newMatches = generateNextSwissRound(
+      tournament.participants,
+      tournament.matches,
+      nextRound,
+      avoidRematches
+    );
+
+    // Assigner l'ID du tournoi
+    const matchesWithTournament = newMatches.map(m => ({ ...m, tournamentId }));
+
+    // Mettre à jour les standings avec les points configurés
+    const pointsConfig = {
+      pointsWin: tournament.config.pointsWin,
+      pointsDraw: tournament.config.pointsDraw,
+      pointsLoss: tournament.config.pointsLoss
+    };
+    const standings = calculateSwissStandings(
+      tournament.participants, 
+      tournament.matches, 
+      pointsConfig,
+      tournament.penalties
+    );
+    const groupStandings: GroupStanding[] = standings.map(s => ({
+      participantId: s.participantId,
+      played: s.wins + s.draws + s.losses,
+      won: s.wins,
+      drawn: s.draws,
+      lost: s.losses,
+      pointsFor: s.points,
+      pointsAgainst: 0,
+      points: s.points
+    }));
+
+    // Mettre à jour le groupe avec les standings
+    const updatedGroups = tournament.groups?.map(g => ({
+      ...g,
+      standings: groupStandings
+    })) || [];
+
+    // Sync avec Supabase si activé
+    if (syncEnabled && supabase) {
+      try {
+        const { error } = await supabase
+          .from('matches')
+          .insert(
+            matchesWithTournament.map(m => ({
+              id: m.id,
+              tournament_id: tournamentId,
+              round: m.round,
+              position: m.position,
+              participant1_id: m.participant1Id || null,
+              participant2_id: m.participant2Id || null,
+              winner_id: m.winnerId || null,
+              status: m.status
+            })) as any
+          );
+        
+        if (error) console.error('Error creating swiss matches:', error);
+      } catch (err) {
+        console.error('Error syncing swiss round:', err);
+      }
+    }
+
+    const updated = {
+      ...tournament,
+      matches: [...tournament.matches, ...matchesWithTournament],
+      groups: updatedGroups,
+      events: [...(tournament.events || []), createEvent(
+        'bracket_generated',
+        `Ronde ${nextRound} générée avec ${newMatches.length} matchs`,
+        { round: nextRound }
+      )],
+      updatedAt: new Date()
+    };
+
+    dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
+    syncToSupabase(updated);
+  }, [state.tournaments, syncEnabled, syncToSupabase]);
 
   const submitMatchResult = useCallback((input: MatchResultInput) => {
     const tournament = state.tournaments.find(t => 
@@ -601,6 +745,10 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
       });
     }
 
+    // Déterminer le status du match
+    const isPartial = input.isPartial === true;
+    const matchStatus = isPartial ? 'in_progress' : 'completed';
+
     const updatedMatch: Match = {
       ...match,
       score: {
@@ -608,17 +756,19 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
         participant2Score: input.participant2Score
       },
       scoreHistory: scoreHistory.length > 0 ? scoreHistory : undefined,
-      winnerId,
-      loserId: winnerId ? (match.participant1Id === winnerId ? match.participant2Id : match.participant1Id) : undefined,
-      status: 'completed',
-      completedAt: new Date()
+      games: input.games || match.games, // Stocker les manches du Best-of
+      winnerId: isPartial ? undefined : winnerId, // Pas de vainqueur si partiel
+      loserId: !isPartial && winnerId ? (match.participant1Id === winnerId ? match.participant2Id : match.participant1Id) : undefined,
+      status: matchStatus as 'in_progress' | 'completed',
+      startedAt: match.startedAt || new Date(),
+      completedAt: isPartial ? undefined : new Date()
     };
 
     const updatedMatches = [...tournament.matches];
     updatedMatches[matchIndex] = updatedMatch;
 
-    // Si élimination simple, faire avancer le gagnant
-    if (tournament.format === 'single_elimination' || tournament.format === 'double_elimination') {
+    // Si élimination simple, faire avancer le gagnant (seulement si match terminé)
+    if (!isPartial && (tournament.format === 'single_elimination' || tournament.format === 'double_elimination')) {
       if (winnerId) {
         const nextRoundMatch = updatedMatches.find(m => 
           m.round === match.round + 1 && 
@@ -635,10 +785,10 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
       }
     }
 
-    // Mettre à jour les standings pour groupes et championnat
+    // Mettre à jour les standings pour groupes et championnat (seulement si match terminé)
     let updatedGroups = tournament.groups ? [...tournament.groups] : [];
     
-    if ((tournament.format === 'groups' && match.groupId) || tournament.format === 'championship') {
+    if (!isPartial && ((tournament.format === 'groups' && match.groupId) || tournament.format === 'championship')) {
       const groupId = match.groupId || (tournament.format === 'championship' && updatedGroups[0]?.id);
       const groupIndex = updatedGroups.findIndex(g => g.id === groupId);
       
@@ -712,12 +862,55 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
       }
     }
 
+    // Mettre à jour les standings pour le système suisse (seulement si match terminé)
+    if (!isPartial && tournament.format === 'swiss' && updatedGroups.length > 0) {
+      // Recalculer les standings Swiss à partir de tous les matchs
+      const pointsConfig = {
+        pointsWin: tournament.config.pointsWin,
+        pointsDraw: tournament.config.pointsDraw,
+        pointsLoss: tournament.config.pointsLoss
+      };
+      const swissStandings = calculateSwissStandings(
+        tournament.participants, 
+        updatedMatches, 
+        pointsConfig,
+        tournament.penalties
+      );
+      
+      // Convertir en GroupStanding
+      const groupStandings: GroupStanding[] = swissStandings.map(s => ({
+        participantId: s.participantId,
+        played: s.wins + s.draws + s.losses,
+        won: s.wins,
+        drawn: s.draws,
+        lost: s.losses,
+        pointsFor: s.points,
+        pointsAgainst: 0, // Pas utilisé en Swiss
+        points: s.points
+      }));
+      
+      // Mettre à jour le groupe
+      updatedGroups = updatedGroups.map(g => ({
+        ...g,
+        standings: groupStandings
+      }));
+    }
+
     // Vérifier si le tournoi est terminé
-    const allCompleted = updatedMatches.every(m => m.status === 'completed');
+    const allMatchesCompleted = updatedMatches.every(m => m.status === 'completed');
+    
+    // Pour Swiss, vérifier si toutes les rondes sont jouées
+    let isTournamentCompleted = allMatchesCompleted;
+    if (tournament.format === 'swiss') {
+      const currentRound = Math.max(...updatedMatches.map(m => m.round), 0);
+      const totalRounds = tournament.config.swissRounds || Math.ceil(Math.log2(tournament.participants.length));
+      // Swiss n'est terminé que si on a joué toutes les rondes ET que la dernière ronde est complète
+      isTournamentCompleted = allMatchesCompleted && currentRound >= totalRounds;
+    }
     
     // Déterminer le vainqueur du tournoi si terminé
     let tournamentWinnerId: string | undefined;
-    if (allCompleted) {
+    if (isTournamentCompleted) {
       tournamentWinnerId = determineTournamentWinner(
         tournament.format,
         updatedMatches,
@@ -726,19 +919,78 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
         tournament.config.useHeadToHead
       );
     }
+
+    // Créer l'événement
+    const participant1 = tournament.participants.find(p => p.id === match.participant1Id);
+    const participant2 = tournament.participants.find(p => p.id === match.participant2Id);
+    const winner = tournament.participants.find(p => p.id === winnerId);
+    
+    const events = [...(tournament.events || [])];
+    
+    if (isPartial) {
+      // Sauvegarde partielle - match en cours
+      events.push(createEvent(
+        'match_score_updated',
+        `Match en cours : ${participant1?.name || '?'} ${input.participant1Score} - ${input.participant2Score} ${participant2?.name || '?'}`,
+        { 
+          matchId: input.matchId,
+          round: match.round,
+          score: { participant1Score: input.participant1Score, participant2Score: input.participant2Score },
+          games: input.games,
+          isPartial: true
+        }
+      ));
+    } else if (isModification) {
+      events.push(createEvent(
+        'match_score_updated',
+        `Score modifié : ${participant1?.name || '?'} ${input.participant1Score} - ${input.participant2Score} ${participant2?.name || '?'}`,
+        { 
+          matchId: input.matchId,
+          round: match.round,
+          score: { participant1Score: input.participant1Score, participant2Score: input.participant2Score },
+          previousScore: match.score,
+          winnerId,
+          winnerName: winner?.name
+        }
+      ));
+    } else {
+      events.push(createEvent(
+        'match_completed',
+        `Match terminé : ${participant1?.name || '?'} ${input.participant1Score} - ${input.participant2Score} ${participant2?.name || '?'}${winner ? ` • Vainqueur : ${winner.name}` : ''}`,
+        { 
+          matchId: input.matchId,
+          round: match.round,
+          score: { participant1Score: input.participant1Score, participant2Score: input.participant2Score },
+          winnerId,
+          winnerName: winner?.name
+        }
+      ));
+    }
+
+    // Événement de fin de tournoi si terminé
+    if (isTournamentCompleted && tournamentWinnerId) {
+      const tournamentWinner = tournament.participants.find(p => p.id === tournamentWinnerId);
+      events.push(createEvent(
+        'tournament_completed',
+        `Tournoi terminé ! Vainqueur : ${tournamentWinner?.name || '?'}`,
+        { winnerId: tournamentWinnerId, winnerName: tournamentWinner?.name }
+      ));
+    }
     
     const updated: Tournament = {
       ...tournament,
       matches: updatedMatches,
       groups: updatedGroups,
-      status: allCompleted ? 'completed' : 'in_progress',
+      events,
+      status: isTournamentCompleted ? 'completed' : 'in_progress',
       winnerId: tournamentWinnerId,
-      completedAt: allCompleted ? new Date() : undefined,
+      completedAt: isTournamentCompleted ? new Date() : undefined,
       updatedAt: new Date()
     };
 
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
-  }, [state.tournaments]);
+    syncToSupabase(updated);
+  }, [state.tournaments, syncToSupabase]);
 
   const startTournament = useCallback((tournamentId: string) => {
     const tournament = state.tournaments.find(t => t.id === tournamentId);
@@ -746,39 +998,70 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
 
     const updated = {
       ...tournament,
+      events: [...(tournament.events || []), createEvent(
+        'tournament_started',
+        'Le tournoi a démarré'
+      )],
       status: 'in_progress' as const,
       startedAt: new Date(),
       updatedAt: new Date()
     };
 
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
-  }, [state.tournaments]);
+    syncToSupabase(updated);
+  }, [state.tournaments, syncToSupabase]);
 
   const setTournamentWinner = useCallback((tournamentId: string, winnerId: string) => {
     const tournament = state.tournaments.find(t => t.id === tournamentId);
     if (!tournament) return;
 
+    const winner = tournament.participants.find(p => p.id === winnerId);
+
     const updated = {
       ...tournament,
       winnerId,
+      status: 'completed' as const,
+      completedAt: new Date(),
+      events: [...(tournament.events || []), createEvent(
+        'tournament_completed',
+        `Tournoi terminé ! Vainqueur : ${winner?.name || '?'}`,
+        { winnerId, winnerName: winner?.name }
+      )],
       updatedAt: new Date()
     };
 
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
-  }, [state.tournaments]);
+    syncToSupabase(updated);
+  }, [state.tournaments, syncToSupabase]);
 
   // Ajouter une pénalité à un participant
-  const addPenalty = useCallback((tournamentId: string, participantId: string, points: number, reason: string) => {
+  const addPenalty = useCallback(async (tournamentId: string, participantId: string, points: number, reason: string) => {
     const tournament = state.tournaments.find(t => t.id === tournamentId);
     if (!tournament) return;
 
+    let penaltyId = uuidv4();
+
+    // Créer dans Supabase si activé
+    if (syncEnabled) {
+      try {
+        const created = await tournamentService.addPenalty(tournamentId, participantId, points, reason);
+        penaltyId = created.id;
+        console.log('Penalty added to Supabase:', created);
+      } catch (err) {
+        console.error('Error adding penalty to Supabase:', err);
+      }
+    }
+
     const newPenalty: Penalty = {
-      id: uuidv4(),
+      id: penaltyId,
       participantId,
       points,
       reason,
       createdAt: new Date()
     };
+
+    // Trouver le participant pour l'événement
+    const participant = tournament.participants.find(p => p.id === participantId);
 
     // Mettre à jour les standings si c'est un championnat ou groupe
     let updatedGroups = tournament.groups;
@@ -801,19 +1084,35 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
       ...tournament,
       penalties: [...(tournament.penalties || []), newPenalty],
       groups: updatedGroups,
+      events: [...(tournament.events || []), createEvent(
+        'penalty_added',
+        `Pénalité de ${points} point(s) pour ${participant?.name || '?'} : ${reason}`,
+        { participantId, participantName: participant?.name, penaltyId, penaltyPoints: points, reason }
+      )],
       updatedAt: new Date()
     };
 
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
-  }, [state.tournaments]);
+    syncToSupabase(updated);
+  }, [state.tournaments, syncEnabled, syncToSupabase]);
 
   // Supprimer une pénalité
-  const removePenalty = useCallback((tournamentId: string, penaltyId: string) => {
+  const removePenalty = useCallback(async (tournamentId: string, penaltyId: string) => {
     const tournament = state.tournaments.find(t => t.id === tournamentId);
     if (!tournament || !tournament.penalties) return;
 
     const penalty = tournament.penalties.find(p => p.id === penaltyId);
     if (!penalty) return;
+
+    // Supprimer de Supabase si activé
+    if (syncEnabled) {
+      try {
+        await tournamentService.removePenalty(penaltyId);
+        console.log('Penalty removed from Supabase:', penaltyId);
+      } catch (err) {
+        console.error('Error removing penalty from Supabase:', err);
+      }
+    }
 
     // Restaurer les points dans les standings
     let updatedGroups = tournament.groups;
@@ -832,15 +1131,24 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
       });
     }
 
+    // Trouver le participant pour l'événement
+    const participant = tournament.participants.find(p => p.id === penalty.participantId);
+
     const updated = {
       ...tournament,
       penalties: tournament.penalties.filter(p => p.id !== penaltyId),
       groups: updatedGroups,
+      events: [...(tournament.events || []), createEvent(
+        'penalty_removed',
+        `Pénalité de ${penalty.points} point(s) retirée pour ${participant?.name || '?'}`,
+        { participantId: penalty.participantId, participantName: participant?.name, penaltyId, penaltyPoints: penalty.points }
+      )],
       updatedAt: new Date()
     };
 
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
-  }, [state.tournaments]);
+    syncToSupabase(updated);
+  }, [state.tournaments, syncEnabled, syncToSupabase]);
 
   // Éliminer un participant
   const eliminateParticipant = useCallback((tournamentId: string, participantId: string, reason: string, useRepechage: boolean = true) => {
@@ -1007,15 +1315,32 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
       updatedStatuses = [...existingStatuses, newStatus];
     }
 
+    // Trouver le participant pour l'événement
+    const participant = tournament.participants.find(p => p.id === participantId);
+    const repechedParticipant = repechedParticipantId 
+      ? tournament.participants.find(p => p.id === repechedParticipantId)
+      : undefined;
+
+    let eventDescription = `${participant?.name || '?'} éliminé : ${reason}`;
+    if (repechedParticipant) {
+      eventDescription += ` (${repechedParticipant.name} repêché)`;
+    }
+
     const updated = {
       ...tournament,
       participantStatuses: updatedStatuses,
       matches: updatedMatches,
+      events: [...(tournament.events || []), createEvent(
+        'participant_eliminated',
+        eventDescription,
+        { participantId, participantName: participant?.name, reason }
+      )],
       updatedAt: new Date()
     };
 
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
-  }, [state.tournaments]);
+    syncToSupabase(updated);
+  }, [state.tournaments, syncToSupabase]);
 
   // Réintégrer un participant éliminé
   const reinstateParticipant = useCallback((tournamentId: string, participantId: string) => {
@@ -1108,15 +1433,24 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
       return s;
     });
 
+    // Trouver le participant pour l'événement
+    const participant = tournament.participants.find(p => p.id === participantId);
+
     const updated = {
       ...tournament,
       participantStatuses: updatedStatuses,
       matches: updatedMatches,
+      events: [...(tournament.events || []), createEvent(
+        'participant_reinstated',
+        `${participant?.name || '?'} réintégré dans le tournoi`,
+        { participantId, participantName: participant?.name }
+      )],
       updatedAt: new Date()
     };
 
     dispatch({ type: 'UPDATE_TOURNAMENT', payload: updated });
-  }, [state.tournaments]);
+    syncToSupabase(updated);
+  }, [state.tournaments, syncToSupabase]);
 
   const value: TournamentContextType = {
     ...state,
@@ -1126,14 +1460,18 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
     setCurrentTournament,
     addParticipant,
     removeParticipant,
+    updateParticipantSeed,
     generateBracket,
+    generateSwissNextRound,
     submitMatchResult,
     startTournament,
     setTournamentWinner,
     addPenalty,
     removePenalty,
     eliminateParticipant,
-    reinstateParticipant
+    reinstateParticipant,
+    loadTournaments,
+    syncEnabled
   };
 
   return (

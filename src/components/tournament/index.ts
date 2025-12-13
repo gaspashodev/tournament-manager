@@ -6,3 +6,4 @@ export * from './ParticipantsList';
 export * from './MatchResultModal';
 export * from './WinnerSelectionModal';
 export * from './ParticipantManagementModal';
+export * from './TournamentHistory';
